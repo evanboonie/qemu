@@ -148,6 +148,11 @@ config MAC_NEWWORLD
     select UNIN_PCI
     select FW_CFG_PPC
 
+config MAC_G5
+    bool
+    default y
+    depends on PPC64 && MAC_NEWWORLD
+
 config E500
     bool
     imply AT24C

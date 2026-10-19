@@ -1609,6 +1609,8 @@ L: qemu-ppc@nongnu.org
 S: Odd Fixes
 F: docs/system/ppc/powermac.rst
 F: hw/ppc/mac_newworld.c
+F: hw/ppc/mac_newworld.h
+F: hw/ppc/mac_g5.c
 F: hw/pci-host/uninorth.c
 F: hw/misc/macio/
 F: hw/misc/mos6522*.c
