@@ -23,8 +23,9 @@ static void powermac7_3_init(MachineState *machine)
      * The bundled openbios-ppc is upstream's, whose entry() indexes its
      * known_arch[] with the machine ID unchecked, so ARCH_POWERMAC7_3 runs
      * it past the array's end. Only an OpenBIOS built from the fork's g5
-     * knows the ID. Under qtest no guest code runs, and the qtests that
-     * start every machine pass no -bios, so they keep the bundled image.
+     * knows the ID. Under the qtest accelerator no guest code runs, and
+     * the qtests that start every machine pass no -bios, so they keep the
+     * bundled image. A qtest that runs TCG needs -bios like anyone else.
      */
     if (!machine->firmware && !qtest_enabled()) {
         error_report("powermac7_3 needs -bios with an OpenBIOS built from "
