@@ -298,10 +298,34 @@ static void unin_agp_pci_host_realize(PCIDevice *d, Error **errp)
     /* d->config[PCI_CAPABILITY_LIST] = 0x80; */
 }
 
+/* AGP 3.0 status bits, which pci_regs.h doesn't name */
+#define U3_AGP_STATUS_MODE3     0x0008  /* AGP 3.0 signalling */
+#define U3_AGP_STATUS_8X        0x0002  /* 8x, in AGP 3.0 mode */
+
 static void u3_agp_pci_host_realize(PCIDevice *d, Error **errp)
 {
+    int cap;
+
     d->config[PCI_CACHE_LINE_SIZE] = 0x08;
     d->config[PCI_LATENCY_TIMER] = 0x10;
+
+    /*
+     * Mac OS X's AppleMacRiscAGP, the only driver for a u3-agp node, won't
+     * configure a bridge without an AGP capability. The real U3's isn't
+     * documented, so its status has the bits the real AGP G5 enables:
+     * Mac OS X 10.5.8 programs its card with 0x1f00030a, and it only sets
+     * the bits that both U3 and the card report. There's no GART, so
+     * writes to the command register are kept and do nothing else.
+     */
+    cap = pci_add_capability(d, PCI_CAP_ID_AGP, 0x80, PCI_AGP_SIZEOF, errp);
+    if (cap < 0) {
+        return;
+    }
+    d->config[cap + PCI_AGP_VERSION] = 0x30;
+    pci_set_long(d->config + cap + PCI_AGP_STATUS,
+                 0x1f000000 | PCI_AGP_STATUS_SBA | U3_AGP_STATUS_MODE3 |
+                 U3_AGP_STATUS_8X);
+    pci_set_long(d->wmask + cap + PCI_AGP_COMMAND, 0xffffffff);
 }
 
 static void unin_internal_pci_host_realize(PCIDevice *d, Error **errp)

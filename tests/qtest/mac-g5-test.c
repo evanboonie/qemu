@@ -3,8 +3,9 @@
  *
  * Checks what OpenBIOS and the guest see before any firmware runs: the
  * machine ID and VIA configuration in fw_cfg, the devices in U3's AGP
- * bus, U3's version register and where its PCI I/O window is. mac99's 970
- * path is checked the same way, since the two share their init.
+ * bus, U3's version register, where its PCI I/O window is, and its host
+ * bridge's AGP capability. mac99's 970 path is checked the same way, since
+ * the two share their init.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -14,6 +15,7 @@
 #include "libqos/fw_cfg.h"
 #include "libqtest.h"
 #include "hw/pci/pci_ids.h"
+#include "hw/pci/pci_regs.h"
 #include "standard-headers/linux/qemu_fw_cfg.h"
 
 /* From include/hw/ppc/ppc.h */
@@ -40,6 +42,9 @@
 
 /* From include/hw/pci/pci.h */
 #define PCI_DEVICE_ID_APPLE_UNI_N_KEYL  0x0022
+
+/* U3's AGP capability, from u3_agp_pci_host_realize() */
+#define U3_AGP_CAP              0x80
 
 /*
  * Read a config dword through U3's registers, which are little-endian.
@@ -73,6 +78,37 @@ static void check_io_window(QTestState *qts, const char *window,
     g_assert_null(strstr(mtree, not_window));
 }
 
+static void u3_config_writel(QTestState *qts, int slot, int reg,
+                             uint32_t val)
+{
+    uint32_t addr = (1u << 31) | (slot << 11) | reg;
+
+    qtest_writel(qts, U3_AGP_CONFIG_ADDR, bswap32(addr));
+    qtest_writel(qts, U3_AGP_CONFIG_DATA, bswap32(val));
+}
+
+/* The AGP capability Mac OS X's AppleMacRiscAGP needs on U3's host bridge */
+static void check_agp_capability(QTestState *qts)
+{
+    g_assert_true((u3_config_readl(qts, 11, PCI_COMMAND) >> 16) &
+                  PCI_STATUS_CAP_LIST);
+    g_assert_cmphex(u3_config_readl(qts, 11, PCI_CAPABILITY_LIST) & 0xff, ==,
+                    U3_AGP_CAP);
+
+    /* AGP's ID, version 3.0, and the last capability in the list */
+    g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP) & 0xffffff, ==,
+                    0x30 << 16 | PCI_CAP_ID_AGP);
+    g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_STATUS), ==,
+                    0x1f00020a);
+
+    /* The command register keeps what's written to it */
+    g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND), ==,
+                    0);
+    u3_config_writel(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND, 0x1f00030a);
+    g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND), ==,
+                    0x1f00030a);
+}
+
 static void check_machine(const char *machine, uint16_t machine_id,
                           uint32_t via_config, uint32_t u3_version,
                           const char *io_window, const char *not_io_window)
@@ -96,6 +132,8 @@ static void check_machine(const char *machine, uint16_t machine_id,
     g_assert_cmphex(qtest_readl(qts, U3_REG_BASE), ==, u3_version);
     check_io_window(qts, io_window, not_io_window);
 
+    check_agp_capability(qts);
+
     qtest_quit(qts);
 }
 
@@ -110,7 +148,7 @@ static void test_powermac7_3(void)
 /* mac99's 970 keeps the G4's UniNorth version and I/O at 0xf2000000 */
 static void test_mac99_970(void)
 {
-    check_machine("mac99", ARCH_MAC99_U3, CORE99_VIA_CONFIG_CUDA,
+    check_machine("mac99 -cpu 970fx", ARCH_MAC99_U3, CORE99_VIA_CONFIG_CUDA,
                   UNINORTH_VERSION_10A, IO_WINDOW_MAC99,
                   IO_WINDOW_POWERMAC7_3);
 }
