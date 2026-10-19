@@ -31,6 +31,11 @@
 #define FLASH_ID0 0x0001
 #define FLASH_ID1 0x227E
 
+/* For the TCG guest: r2d's SDRAM past the code -kernel loads, and the data. */
+#define GUEST_RESULT_ADDR 0x0c900000
+#define GUEST_PATTERN_OFFSET 0x100
+#define GUEST_PATTERN "\x01\x02\x03\x04\x05\x06\x07\x08"
+
 /* Use a newtype to keep flash addresses separate from byte addresses. */
 typedef struct {
     uint64_t addr;
@@ -66,6 +71,8 @@ typedef struct {
 } FlashConfig;
 
 static char *image_path;
+static char *guest_code_path;
+static char *guest_image_path;
 
 /*
  * The pflash implementation allows some parameters to be unspecified. We want
@@ -615,47 +622,88 @@ static void test_cfi_in_autoselect(const void *opaque)
 }
 
 /*
- * A guest's 8-byte load from the flash in CFI query mode. qtest's own reads
- * are split to the device's maximum access size before they reach it, so
- * this runs a few SH-4 instructions under TCG, whose 8-byte load (fmov.d with
- * FPSCR.SZ set) reaches the device as one access. The guest stores what that
- * load returned, then what two 4-byte loads of the same address return, and
- * the two must match.
+ * A guest's 8-byte accesses to the flash. qtest's own accesses are split to
+ * the device's maximum access size before they reach it, so this runs a few
+ * SH-4 instructions under TCG, whose 8-byte loads and stores (fmov.d with
+ * FPSCR.SZ set) reach the device as one access. Each 8-byte load is compared
+ * with two 4-byte loads of the same 8 bytes:
+ *   R + 0x00: in unlock bypass mode, which turns ROMD off, the 8-byte load of
+ *             GUEST_PATTERN; R + 0x08 and R + 0x0c, the two 4-byte loads.
+ *   R + 0x10: in CFI query mode, the 8-byte load of "QRY"; R + 0x18 and
+ *             R + 0x1c, the two 4-byte loads, made after an 8-byte store of
+ *             RESET_CMD, which the device must refuse.
+ *   R + 0x20: 1 once the guest is done.
+ * Leaving ROMD flushes the TLB asynchronously, at the start of the next
+ * translation block. fschg ends the block, so the code doesn't load from the
+ * flash between the command that leaves ROMD and the next fschg.
  */
-#define GUEST_RESULT_ADDR 0x0c900000 /* r2d SDRAM, past the loaded code */
-
 static const uint16_t guest_code[] = {
-    0xd109, /* mov.l   @(0x28,pc),r1  ! r1 = CFI_ADDR in bytes, in P2 */
-    0xe098, /* mov     #0x98,r0 */
+    0xd317, /* mov.l   @(0x60,pc),r3  ! r3 = R, the results, in P2 */
+    0xd518, /* mov.l   @(0x64,pc),r5  ! r5 = UNLOCK0_ADDR in bytes */
+    0xd618, /* mov.l   @(0x68,pc),r6  ! r6 = UNLOCK1_ADDR in bytes */
+    0xe0aa, /* mov     #0xaa,r0 */
     0x600c, /* extu.b  r0,r0 */
-    0x2101, /* mov.w   r0,@r1         ! enter CFI query mode */
-    0xd208, /* mov.l   @(0x2c,pc),r2  ! r2 = "QRY", at FLASH_ADDR(0x10) */
-    0xd309, /* mov.l   @(0x30,pc),r3  ! r3 = GUEST_RESULT_ADDR, in P2 */
+    0x2501, /* mov.w   r0,@r5 */
+    0xe055, /* mov     #0x55,r0 */
+    0x2601, /* mov.w   r0,@r6 */
+    0xe020, /* mov     #0x20,r0 */
+    0x2501, /* mov.w   r0,@r5         ! unlock bypass: ROMD is off */
+    0xd215, /* mov.l   @(0x6c,pc),r2  ! r2 = the pattern, at byte 0x100 */
     0xf3fd, /* fschg                  ! FPSCR.SZ = 1 */
-    0xf028, /* fmov.d  @r2,dr0        ! the 8-byte load */
-    0xf30a, /* fmov.d  dr0,@r3 */
+    0xf028, /* fmov.d  @r2,dr0        ! 8-byte array read */
+    0xf30a, /* fmov.d  dr0,@r3        ! R + 0 */
     0xf3fd, /* fschg                  ! FPSCR.SZ = 0 */
     0x6422, /* mov.l   @r2,r4 */
     0x1342, /* mov.l   r4,@(8,r3) */
     0x7204, /* add     #4,r2 */
     0x6422, /* mov.l   @r2,r4 */
     0x1343, /* mov.l   r4,@(12,r3) */
+    0xe090, /* mov     #0x90,r0 */
+    0x600c, /* extu.b  r0,r0 */
+    0x2501, /* mov.w   r0,@r5 */
+    0xe000, /* mov     #0,r0 */
+    0x2501, /* mov.w   r0,@r5         ! unlock bypass reset */
+    0xd10f, /* mov.l   @(0x70,pc),r1  ! r1 = CFI_ADDR in bytes */
+    0xe098, /* mov     #0x98,r0 */
+    0x600c, /* extu.b  r0,r0 */
+    0x2101, /* mov.w   r0,@r1         ! CFI query mode */
+    0xd20e, /* mov.l   @(0x74,pc),r2  ! r2 = "QRY", at FLASH_ADDR(0x10) */
+    0x7310, /* add     #16,r3 */
+    0xf3fd, /* fschg                  ! FPSCR.SZ = 1 */
+    0xf028, /* fmov.d  @r2,dr0        ! 8-byte CFI read */
+    0xf30a, /* fmov.d  dr0,@r3        ! R + 0x10 */
+    0xd40c, /* mov.l   @(0x78,pc),r4  ! r4 = the 8-byte reset command below */
+    0xf248, /* fmov.d  @r4,dr2 */
+    0xf22a, /* fmov.d  dr2,@r2        ! 8-byte write: refused */
+    0xf3fd, /* fschg                  ! FPSCR.SZ = 0 */
+    0x6422, /* mov.l   @r2,r4         ! still in CFI mode */
+    0x1342, /* mov.l   r4,@(8,r3) */
+    0x7204, /* add     #4,r2 */
+    0x6422, /* mov.l   @r2,r4 */
+    0x1343, /* mov.l   r4,@(12,r3) */
     0xe401, /* mov     #1,r4 */
     0x1344, /* mov.l   r4,@(16,r3)    ! done */
-    0xaffe, /* bra     .  */
+    0xaffe, /* bra     . */
     0x0009, /* nop */
-    0x0009, /* nop, so the literals start at 0x28 */
-    0x00aa, 0xa000, /* 0x28: 0xa00000aa */
-    0x0020, 0xa000, /* 0x2c: 0xa0000020 */
-    0x0000, 0xac90, /* 0x30: 0xac900000 */
+    0x0009, /* nop, to align the literals */
+    0x0000, 0xac90, /* 0x60: 0xac900000 */
+    0x0aaa, 0xa000, /* 0x64: 0xa0000aaa */
+    0x0554, 0xa000, /* 0x68: 0xa0000554 */
+    0x0100, 0xa000, /* 0x6c: 0xa0000100 */
+    0x00aa, 0xa000, /* 0x70: 0xa00000aa */
+    0x0020, 0xa000, /* 0x74: 0xa0000020 */
+    0x0080, 0xac80, /* 0x78: 0xac800080 */
+    0x0000, /* padding, to align the next literal */
+    0x0000, /* padding, to align the next literal */
+    0x00f0, 0x0000, 0x0000, 0x0000, /* 0x80: RESET_CMD, 8 bytes */
 };
 
-static void test_guest_8byte_read(const void *opaque)
+static void test_guest_8byte_access(void)
 {
     QTestState *qtest;
-    g_autofree char *code_path = NULL;
     GError *err = NULL;
-    uint8_t res[16];
+    uint16_t code[ARRAY_SIZE(guest_code)];
+    uint8_t res[0x20];
     int fd;
 
     if (!qtest_has_accel("tcg")) {
@@ -663,39 +711,68 @@ static void test_guest_8byte_read(const void *opaque)
         return;
     }
 
-    /* r2d's SH-4 is little-endian. */
-    fd = g_file_open_tmp("qtest-code.XXXXXX", &code_path, &err);
+    /* A flash image with GUEST_PATTERN at byte GUEST_PATTERN_OFFSET. */
+    fd = g_file_open_tmp("qtest-image.XXXXXX", &guest_image_path, &err);
     g_assert_no_error(err);
-    for (size_t i = 0; i < ARRAY_SIZE(guest_code); i++) {
-        uint16_t insn = cpu_to_le16(guest_code[i]);
-        g_assert(write(fd, &insn, sizeof(insn)) == sizeof(insn));
-    }
+    g_assert(ftruncate(fd, UNIFORM_FLASH_SIZE) == 0);
+    g_assert(pwrite(fd, GUEST_PATTERN, sizeof(GUEST_PATTERN) - 1,
+                    GUEST_PATTERN_OFFSET) == sizeof(GUEST_PATTERN) - 1);
     close(fd);
 
-    qtest = qtest_initf("-M r2d -accel tcg -kernel %s", code_path);
+    /* r2d's SH-4 is little-endian. */
+    for (size_t i = 0; i < ARRAY_SIZE(guest_code); i++) {
+        code[i] = cpu_to_le16(guest_code[i]);
+    }
+    fd = g_file_open_tmp("qtest-code.XXXXXX", &guest_code_path, &err);
+    g_assert_no_error(err);
+    close(fd);
+    g_file_set_contents(guest_code_path, (const char *)code, sizeof(code),
+                        &err);
+    g_assert_no_error(err);
+
+    qtest = qtest_initf("-M r2d -accel tcg -kernel %s"
+                        " -drive if=pflash,file=%s,format=raw",
+                        guest_code_path, guest_image_path);
+    /* QEMU has loaded the code by now. */
+    unlink(guest_code_path);
+    g_clear_pointer(&guest_code_path, g_free);
+
     for (int i = 0; i < 1000; i++) {
-        if (qtest_readl(qtest, GUEST_RESULT_ADDR + 16) == 1) {
+        if (qtest_readl(qtest, GUEST_RESULT_ADDR + 0x20) == 1) {
             break;
         }
         g_usleep(10 * 1000);
     }
-    g_assert_cmphex(qtest_readl(qtest, GUEST_RESULT_ADDR + 16), ==, 1);
-
+    g_assert_cmphex(qtest_readl(qtest, GUEST_RESULT_ADDR + 0x20), ==, 1);
     qtest_memread(qtest, GUEST_RESULT_ADDR, res, sizeof(res));
-    /* A 16-bit wide flash returns one CFI byte per 4-byte load. */
-    g_assert_cmphex(ldl_le_p(&res[8]), ==, 'Q');
-    g_assert_cmphex(ldl_le_p(&res[12]), ==, 'Y');
-    /* The 8-byte load returns what the two 4-byte loads did. */
-    g_assert_cmphex(ldq_le_p(&res[0]), ==, ldq_le_p(&res[8]));
+
+    /* Unlock bypass: the 4-byte loads read the pattern, and so does ldq. */
+    g_assert_cmpmem(&res[0x08], 8, GUEST_PATTERN, 8);
+    g_assert_cmphex(ldq_le_p(&res[0x00]), ==, ldq_le_p(&res[0x08]));
+
+    /*
+     * CFI query: a 16-bit wide flash returns one CFI byte per 4-byte load.
+     * Reading 'Q' after the 8-byte store of RESET_CMD shows it was refused.
+     */
+    g_assert_cmphex(ldl_le_p(&res[0x18]), ==, 'Q');
+    g_assert_cmphex(ldl_le_p(&res[0x1c]), ==, 'Y');
+    g_assert_cmphex(ldq_le_p(&res[0x10]), ==, ldq_le_p(&res[0x18]));
 
     qtest_quit(qtest);
-    unlink(code_path);
+    unlink(guest_image_path);
+    g_clear_pointer(&guest_image_path, g_free);
 }
 
 static void cleanup(void *opaque)
 {
     unlink(image_path);
     g_free(image_path);
+    if (guest_code_path) {
+        unlink(guest_code_path);
+    }
+    if (guest_image_path) {
+        unlink(guest_image_path);
+    }
 }
 
 /*
@@ -761,8 +838,8 @@ int main(int argc, char **argv)
 
     qtest_add_data_func("pflash-cfi02/cfi-in-autoselect", &configuration[0],
                         test_cfi_in_autoselect);
-    qtest_add_data_func("pflash-cfi02/guest-8byte-read", NULL,
-                        test_guest_8byte_read);
+    qtest_add_func("pflash-cfi02/guest-8byte-access",
+                   test_guest_8byte_access);
     int result = g_test_run();
     cleanup(NULL);
     return result;

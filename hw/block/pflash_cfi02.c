@@ -730,15 +730,24 @@ static void pflash_write(void *opaque, hwaddr offset, uint64_t value,
     pfl->cmd = 0;
 }
 
+/*
+ * A 64-bit guest may load 8 bytes at once, for example in a 64-bit memcpy(),
+ * and the memory core splits that read into two 4-byte reads. An 8-byte write
+ * would be split into two write cycles in the same way, and the state machine
+ * could take the second half's data for a command, so refuse it.
+ */
+static bool pflash_cfi02_accepts(void *opaque, hwaddr addr, unsigned size,
+                                 bool is_write, MemTxAttrs attrs)
+{
+    return !is_write || size <= 4;
+}
+
 static const MemoryRegionOps pflash_cfi02_ops = {
     .read = pflash_read,
     .write = pflash_write,
     .valid.min_access_size = 1,
-    /*
-     * A 64-bit guest may load 8 bytes at once, for example in a 64-bit
-     * memcpy(). The memory core splits such an access in two.
-     */
     .valid.max_access_size = 8,
+    .valid.accepts = pflash_cfi02_accepts,
     .impl.min_access_size = 1,
     .impl.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
