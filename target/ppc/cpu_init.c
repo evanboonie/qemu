@@ -5103,6 +5103,23 @@ static void register_970_hior_sprs(CPUPPCState *env)
                  0x00000000);
 }
 
+/*
+ * The 970 has HSPRG0 and HSPRG1. QEMU's 970 has no MSR[HV], so, as for
+ * HIOR, supervisor code reaches them. Mac OS X's 64-bit interrupt return
+ * keeps a GPR in HSPRG0 across its SPRG3 load.
+ */
+static void register_970_hsprg_sprs(CPUPPCState *env)
+{
+    spr_register(env, SPR_HSPRG0, "HSPRG0",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_generic,
+                 0x00000000);
+    spr_register(env, SPR_HSPRG1, "HSPRG1",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_generic,
+                 0x00000000);
+}
+
 static void register_book3s_ctrl_sprs(CPUPPCState *env)
 {
     spr_register(env, SPR_CTRL, "CTRL",
@@ -5965,6 +5982,7 @@ static void init_proc_970(CPUPPCState *env)
     /* 970 Specific Registers */
     register_970_hid_sprs(env);
     register_970_hior_sprs(env);
+    register_970_hsprg_sprs(env);
     register_low_BATs(env);
     register_970_pmu_sup_sprs(env);
     register_970_pmu_user_sprs(env);

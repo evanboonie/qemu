@@ -1093,6 +1093,15 @@ bool ppc_hash64_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
             cs->exception_index = POWERPC_EXCP_DSEG;
             env->error_code = 0;
             env->spr[SPR_DAR] = eaddr;
+            /*
+             * The architecture leaves DSISR undefined here. The 970MP
+             * writes 0x00200000. Mac OS X reads DSISR as for a DSI, and
+             * loads the segment only if DSISR_NOPTE is clear, so the last
+             * DSI's value would make it take the same DSEG forever.
+             */
+            if (env->mmu_model == POWERPC_MMU_64B) {
+                env->spr[SPR_DSISR] = 0x00200000;
+            }
             break;
         default:
             g_assert_not_reached();
