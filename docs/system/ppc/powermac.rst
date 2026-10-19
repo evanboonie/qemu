@@ -11,7 +11,9 @@ PowerPC system.
 
 ``powermac7_3`` is the machine ``mac99`` builds for a 970, with U3's AGP
 bus, the PMU and a machine ID of its own for the firmware. It takes only
-a 970 CPU. The bundled OpenBIOS doesn't support it yet.
+a 970 CPU. The bundled OpenBIOS doesn't support it, so it needs
+``-bios`` with an OpenBIOS built from the ``g5`` branch of
+https://github.com/evanboonie/openbios, and refuses to start without one.
 
 Supported devices
 -----------------

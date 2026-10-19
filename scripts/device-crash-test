@@ -75,6 +75,7 @@ ERROR_RULE_LIST = [
     {'machine':'niagara', 'expected':True},       # Unable to load a firmware for -M niagara
     {'machine':'boston', 'expected':True},        # Please provide either a -kernel or -bios argument
     {'machine':'leon3_generic', 'expected':True}, # Can't read bios image (null)
+    {'machine':'powermac7_3', 'expected':True},   # powermac7_3 needs -bios with an OpenBIOS built from ...
 
     # devices that don't work out of the box because they require extra options to "-device DEV":
     #            DEVICE                                    | ERROR MESSAGE
