@@ -5095,6 +5095,18 @@ static void register_970_hid_sprs(CPUPPCState *env)
                  POWERPC970_HID5_INIT);
 }
 
+/*
+ * Probe for evanboonie/qemu-g5#12, not for merging: xnu's 64-bit exception
+ * exit parks r30 in HSPRG0 across its SPRG3 load before rfid.
+ */
+static void register_970_hsprg0_sprs(CPUPPCState *env)
+{
+    spr_register(env, SPR_HSPRG0, "HSPRG0",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_generic,
+                 0x00000000);
+}
+
 static void register_970_hior_sprs(CPUPPCState *env)
 {
     spr_register(env, SPR_HIOR, "HIOR",
@@ -5965,6 +5977,7 @@ static void init_proc_970(CPUPPCState *env)
     /* 970 Specific Registers */
     register_970_hid_sprs(env);
     register_970_hior_sprs(env);
+    register_970_hsprg0_sprs(env);
     register_low_BATs(env);
     register_970_pmu_sup_sprs(env);
     register_970_pmu_user_sprs(env);
