@@ -306,6 +306,21 @@ static void ppc_core99_init(MachineState *machine)
         /* Register 8 MB of ISA IO space */
         memory_region_add_subregion(get_system_memory(), 0xf2000000,
                                     sysbus_mmio_get_region(s, 3));
+        /*
+         * Probe for evanboonie/qemu-g5#15, not for merging: Mac OS X's
+         * AppleMacRiscAGP finds the config registers at the bridge's
+         * PCI I/O base + 0x800000 and + 0xc00000, so alias them there.
+         */
+        for (i = 0; i < 2; i++) {
+            MemoryRegion *alias = g_new(MemoryRegion, 1);
+
+            memory_region_init_alias(alias, OBJECT(uninorth_pci_dev),
+                                     i ? "u3-pci-conf-data-alias" :
+                                         "u3-pci-conf-idx-alias",
+                                     sysbus_mmio_get_region(s, i), 0, 0x1000);
+            memory_region_add_subregion(get_system_memory(),
+                                        0xf2800000 + i * 0x400000, alias);
+        }
     } else {
         machine_arch = ARCH_MAC99;
         /* Use values found on a real PowerMac */
