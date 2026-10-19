@@ -342,8 +342,24 @@ static int ppc_find_slb_vsid(PowerPCCPU *cpu, target_ulong rb,
 void helper_SLBMTE(CPUPPCState *env, target_ulong rb, target_ulong rs)
 {
     PowerPCCPU *cpu = env_archcpu(env);
+    target_ulong slot = rb & 0xfff;
+    target_ulong esid = rb & ~0xfffULL;
 
-    if (ppc_store_slb(cpu, rb & 0xfff, rb & ~0xfffULL, rs) < 0) {
+    /*
+     * The architecture says RB's bits 37:51 must be 0, and doesn't say
+     * what happens if they aren't. Mac OS X's xnu builds RB from the whole
+     * faulting address for a fault in its copy window, and puts the slot
+     * in only the low 6 bits, so those bits and the index's bits 52:57
+     * can be set. It boots on the real 970s, so on the 970 family's MMU
+     * model ignore the reserved bits, and take the slot from the low 6
+     * bits, as many as its 64-entry SLB needs.
+     */
+    if (env->mmu_model == POWERPC_MMU_64B) {
+        slot = rb & 0x3f;
+        esid = rb & (SLB_ESID_ESID | SLB_ESID_V);
+    }
+
+    if (ppc_store_slb(cpu, slot, esid, rs) < 0) {
         raise_exception_err_ra(env, POWERPC_EXCP_PROGRAM,
                                POWERPC_EXCP_INVAL, GETPC());
     }
