@@ -75,6 +75,7 @@
 #include "hw/usb/usb.h"
 #include "hw/core/sysbus.h"
 #include "trace.h"
+#include "mac_newworld.h"
 
 #define MAX_IDE_BUS 2
 #define CFG_ADDR 0xf0000510
@@ -95,12 +96,6 @@
 typedef struct Core99MachineState Core99MachineState;
 DECLARE_INSTANCE_CHECKER(Core99MachineState, CORE99_MACHINE,
                          TYPE_CORE99_MACHINE)
-
-typedef enum {
-    CORE99_VIA_CONFIG_CUDA = 0,
-    CORE99_VIA_CONFIG_PMU,
-    CORE99_VIA_CONFIG_PMU_ADB
-} Core99ViaConfig;
 
 struct Core99MachineState {
     /*< private >*/
@@ -129,10 +124,10 @@ static void ppc_core99_reset(void *opaque)
     cpu->env.nip = PROM_BASE + 0x100;
 }
 
-/* PowerPC Mac99 hardware initialisation */
-static void ppc_core99_init(MachineState *machine)
+/* PowerPC NewWorld hardware initialisation, for mac99 and powermac7_3 */
+void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
+                       bool powermac7_3)
 {
-    Core99MachineState *core99_machine = CORE99_MACHINE(machine);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     PowerPCCPU *cpu = NULL;
     CPUPPCState *env = NULL;
@@ -144,7 +139,7 @@ static void ppc_core99_init(MachineState *machine)
     hwaddr kernel_base = 0, initrd_base = 0, cmdline_base = 0;
     long kernel_size = 0, initrd_size = 0;
     PCIBus *pci_bus;
-    bool has_pmu, has_adb;
+    bool has_pmu, has_adb, u3;
     Object *macio;
     MACIOIDEState *macio_ide;
     BusState *adb_bus;
@@ -285,14 +280,16 @@ static void ppc_core99_init(MachineState *machine)
         }
     }
 
+    u3 = PPC_INPUT(env) == PPC_FLAGS_INPUT_970;
+
     /* UniN init */
     s = SYS_BUS_DEVICE(qdev_new(TYPE_UNI_NORTH));
     sysbus_realize_and_unref(s, &error_fatal);
     memory_region_add_subregion(get_system_memory(), 0xf8000000,
                                 sysbus_mmio_get_region(s, 0));
 
-    if (PPC_INPUT(env) == PPC_FLAGS_INPUT_970) {
-        machine_arch = ARCH_MAC99_U3;
+    if (u3) {
+        machine_arch = powermac7_3 ? ARCH_POWERMAC7_3 : ARCH_MAC99_U3;
         /* 970 gets a U3 bus */
         /* Uninorth AGP bus */
         uninorth_pci_dev = qdev_new(TYPE_U3_AGP_HOST_BRIDGE);
@@ -340,9 +337,9 @@ static void ppc_core99_init(MachineState *machine)
     }
 
     machine->usb |= defaults_enabled() && !machine->usb_disabled;
-    has_pmu = (core99_machine->via_config != CORE99_VIA_CONFIG_CUDA);
-    has_adb = (core99_machine->via_config == CORE99_VIA_CONFIG_CUDA ||
-               core99_machine->via_config == CORE99_VIA_CONFIG_PMU_ADB);
+    has_pmu = (via_config != CORE99_VIA_CONFIG_CUDA);
+    has_adb = (via_config == CORE99_VIA_CONFIG_CUDA ||
+               via_config == CORE99_VIA_CONFIG_PMU_ADB);
 
     /* init basic PC hardware */
     pci_bus = PCI_HOST_BRIDGE(uninorth_pci_dev)->bus;
@@ -367,7 +364,7 @@ static void ppc_core99_init(MachineState *machine)
     }
 
     /* TODO: additional PCI buses only wired up for 32-bit machines */
-    if (PPC_INPUT(env) != PPC_FLAGS_INPUT_970) {
+    if (!u3) {
         /* Uninorth AGP bus */
         for (i = 0; i < 4; i++) {
             qdev_connect_gpio_out(uninorth_agp_dev, i,
@@ -420,7 +417,7 @@ static void ppc_core99_init(MachineState *machine)
 
         /* U3 needs to use USB for input because Linux doesn't support via-cuda
         on PPC64 */
-        if (!has_adb || machine_arch == ARCH_MAC99_U3) {
+        if (!has_adb || u3) {
             USBBus *usb_bus;
 
             usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
@@ -493,7 +490,7 @@ static void ppc_core99_init(MachineState *machine)
     fw_cfg_add_i16(fw_cfg, FW_CFG_PPC_HEIGHT, graphic_height);
     fw_cfg_add_i16(fw_cfg, FW_CFG_PPC_DEPTH, graphic_depth);
 
-    fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_VIACONFIG, core99_machine->via_config);
+    fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_VIACONFIG, via_config);
 
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_IS_KVM, kvm_enabled());
     if (kvm_enabled()) {
@@ -523,6 +520,13 @@ static void ppc_core99_init(MachineState *machine)
     }
 
     qemu_register_boot_set(fw_cfg_boot_set, fw_cfg);
+}
+
+static void ppc_core99_init(MachineState *machine)
+{
+    Core99MachineState *core99_machine = CORE99_MACHINE(machine);
+
+    ppc_newworld_init(machine, core99_machine->via_config, false);
 }
 
 /*
@@ -565,13 +569,9 @@ static int core99_kvm_type(MachineState *machine, const char *arg)
     return 2;
 }
 
-static void core99_machine_class_init(ObjectClass *oc, const void *data)
+void ppc_newworld_machine_class_init(MachineClass *mc,
+                                     FWPathProviderClass *fwc)
 {
-    MachineClass *mc = MACHINE_CLASS(oc);
-    FWPathProviderClass *fwc = FW_PATH_PROVIDER_CLASS(oc);
-
-    mc->desc = "Mac99 based PowerMac";
-    mc->init = ppc_core99_init;
     mc->block_default_type = IF_IDE;
     /* SMP is not supported currently */
     mc->max_cpus = 1;
@@ -579,14 +579,24 @@ static void core99_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_display = "std";
     mc->default_nic = "sungem";
     mc->kvm_type = core99_kvm_type;
+    mc->ignore_boot_device_suffixes = true;
+    fwc->get_dev_path = core99_fw_dev_path;
+}
+
+static void core99_machine_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    FWPathProviderClass *fwc = FW_PATH_PROVIDER_CLASS(oc);
+
+    ppc_newworld_machine_class_init(mc, fwc);
+    mc->desc = "Mac99 based PowerMac";
+    mc->init = ppc_core99_init;
 #ifdef TARGET_PPC64
     mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("970fx_v3.1");
 #else
     mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("7400_v2.9");
 #endif
     mc->default_ram_id = "ppc_core99.ram";
-    mc->ignore_boot_device_suffixes = true;
-    fwc->get_dev_path = core99_fw_dev_path;
 }
 
 static char *core99_get_via_config(Object *obj, Error **errp)
