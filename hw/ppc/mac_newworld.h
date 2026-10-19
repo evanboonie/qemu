@@ -20,8 +20,10 @@ typedef enum {
 } Core99ViaConfig;
 
 /*
- * Build a NewWorld machine. mac99 picks its host bridges and machine ID
- * from the CPU; powermac7_3 needs a 970 and passes ARCH_POWERMAC7_3.
+ * Build a NewWorld machine. The CPU picks the host bridges and the
+ * machine ID: UniNorth's buses and ARCH_MAC99 for a G4, or U3's AGP bus
+ * and ARCH_MAC99_U3 for a 970. With powermac7_3, which only takes a 970
+ * (its valid_cpu_types), the ID is ARCH_POWERMAC7_3 instead.
  */
 void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
                        bool powermac7_3);

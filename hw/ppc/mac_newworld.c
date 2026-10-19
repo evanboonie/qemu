@@ -281,10 +281,6 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     }
 
     u3 = PPC_INPUT(env) == PPC_FLAGS_INPUT_970;
-    if (powermac7_3 && !u3) {
-        error_report("powermac7_3 needs a 970 CPU");
-        exit(1);
-    }
 
     /* UniN init */
     s = SYS_BUS_DEVICE(qdev_new(TYPE_UNI_NORTH));

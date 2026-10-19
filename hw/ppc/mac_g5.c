@@ -24,11 +24,27 @@ static void powermac7_3_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     FWPathProviderClass *fwc = FW_PATH_PROVIDER_CLASS(oc);
+    /*
+     * Each 970 model, not "970-family": a list of one would also become
+     * the default CPU, and the family type is abstract.
+     */
+    static const char * const valid_cpu_types[] = {
+        POWERPC_CPU_TYPE_NAME("970_v2.2"),
+        POWERPC_CPU_TYPE_NAME("970fx_v1.0"),
+        POWERPC_CPU_TYPE_NAME("970fx_v2.0"),
+        POWERPC_CPU_TYPE_NAME("970fx_v2.1"),
+        POWERPC_CPU_TYPE_NAME("970fx_v3.0"),
+        POWERPC_CPU_TYPE_NAME("970fx_v3.1"),
+        POWERPC_CPU_TYPE_NAME("970mp_v1.0"),
+        POWERPC_CPU_TYPE_NAME("970mp_v1.1"),
+        NULL,
+    };
 
     ppc_newworld_machine_class_init(mc, fwc);
     mc->desc = "Power Mac G5 (PowerMac7,3)";
     mc->init = powermac7_3_init;
     mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("970fx_v3.1");
+    mc->valid_cpu_types = valid_cpu_types;
     mc->default_ram_id = "powermac7_3.ram";
 }
 

@@ -13,6 +13,7 @@
 #include "qemu/bswap.h"
 #include "libqos/fw_cfg.h"
 #include "libqtest.h"
+#include "hw/pci/pci_ids.h"
 #include "standard-headers/linux/qemu_fw_cfg.h"
 
 /* From include/hw/ppc/ppc.h */
@@ -30,8 +31,7 @@
 #define U3_AGP_CONFIG_ADDR      0xf0800000
 #define U3_AGP_CONFIG_DATA      0xf0c00000
 
-#define PCI_VENDOR_ID_APPLE             0x106b
-#define PCI_DEVICE_ID_APPLE_U3_AGP      0x004b
+/* From include/hw/pci/pci.h */
 #define PCI_DEVICE_ID_APPLE_UNI_N_KEYL  0x0022
 
 /*
