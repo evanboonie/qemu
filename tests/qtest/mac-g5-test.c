@@ -2,9 +2,9 @@
  * qtest for the Power Mac G5 machine, powermac7_3
  *
  * Checks what OpenBIOS and the guest see before any firmware runs: the
- * machine ID and VIA configuration in fw_cfg, and the devices in U3's
- * AGP bus. mac99's 970 path is checked the same way, since the two share
- * their init.
+ * machine ID and VIA configuration in fw_cfg, the devices in U3's AGP
+ * bus, U3's version register and where its PCI I/O window is. mac99's 970
+ * path is checked the same way, since the two share their init.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -31,6 +31,13 @@
 #define U3_AGP_CONFIG_ADDR      0xf0800000
 #define U3_AGP_CONFIG_DATA      0xf0c00000
 
+/* U3's own registers, and their version register at offset 0 */
+#define U3_REG_BASE             0xf8000000
+
+/* From include/hw/pci-host/uninorth.h */
+#define UNINORTH_VERSION_10A    0x7
+#define U3_VERSION_POWERMAC7_3  0x35
+
 /* From include/hw/pci/pci.h */
 #define PCI_DEVICE_ID_APPLE_UNI_N_KEYL  0x0022
 
@@ -47,8 +54,28 @@ static uint32_t u3_config_readl(QTestState *qts, int slot, int reg)
     return bswap32(qtest_readl(qts, U3_AGP_CONFIG_DATA));
 }
 
+/*
+ * U3's 8 MB PCI I/O window, as "info mtree" lists it, and where the other
+ * machine has it. On powermac7_3 the window lies under fw_cfg, at a lower
+ * priority, so the fw_cfg reads below also show that fw_cfg still answers.
+ */
+#define IO_WINDOW_POWERMAC7_3 \
+    "00000000f0000000-00000000f07fffff (prio -1, i/o): unin-pci-isa-mmio"
+#define IO_WINDOW_MAC99 \
+    "00000000f2000000-00000000f27fffff (prio 0, i/o): unin-pci-isa-mmio"
+
+static void check_io_window(QTestState *qts, const char *window,
+                            const char *not_window)
+{
+    g_autofree char *mtree = qtest_hmp(qts, "info mtree");
+
+    g_assert_nonnull(strstr(mtree, window));
+    g_assert_null(strstr(mtree, not_window));
+}
+
 static void check_machine(const char *machine, uint16_t machine_id,
-                          uint32_t via_config)
+                          uint32_t via_config, uint32_t u3_version,
+                          const char *io_window, const char *not_io_window)
 {
     QTestState *qts = qtest_initf("-M %s", machine);
     QFWCFG *fw_cfg = mm_fw_cfg_init(qts, NEWWORLD_FW_CFG_BASE);
@@ -66,17 +93,26 @@ static void check_machine(const char *machine, uint16_t machine_id,
                     PCI_DEVICE_ID_APPLE_UNI_N_KEYL << 16 |
                     PCI_VENDOR_ID_APPLE);
 
+    g_assert_cmphex(qtest_readl(qts, U3_REG_BASE), ==, u3_version);
+    check_io_window(qts, io_window, not_io_window);
+
     qtest_quit(qts);
 }
 
+/* The real PowerMac7,3's U3: device-rev 0x35, PCI I/O at 0xf0000000 */
 static void test_powermac7_3(void)
 {
-    check_machine("powermac7_3", ARCH_POWERMAC7_3, CORE99_VIA_CONFIG_PMU);
+    check_machine("powermac7_3", ARCH_POWERMAC7_3, CORE99_VIA_CONFIG_PMU,
+                  U3_VERSION_POWERMAC7_3, IO_WINDOW_POWERMAC7_3,
+                  IO_WINDOW_MAC99);
 }
 
+/* mac99's 970 keeps the G4's UniNorth version and I/O at 0xf2000000 */
 static void test_mac99_970(void)
 {
-    check_machine("mac99", ARCH_MAC99_U3, CORE99_VIA_CONFIG_CUDA);
+    check_machine("mac99", ARCH_MAC99_U3, CORE99_VIA_CONFIG_CUDA,
+                  UNINORTH_VERSION_10A, IO_WINDOW_MAC99,
+                  IO_WINDOW_POWERMAC7_3);
 }
 
 int main(int argc, char *argv[])

@@ -284,6 +284,9 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
 
     /* UniN init */
     s = SYS_BUS_DEVICE(qdev_new(TYPE_UNI_NORTH));
+    if (powermac7_3) {
+        qdev_prop_set_uint32(DEVICE(s), "version", U3_VERSION_POWERMAC7_3);
+    }
     sysbus_realize_and_unref(s, &error_fatal);
     memory_region_add_subregion(get_system_memory(), 0xf8000000,
                                 sysbus_mmio_get_region(s, 0));
@@ -300,9 +303,22 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
         /* PCI hole */
         memory_region_add_subregion(get_system_memory(), 0x80000000,
                                     sysbus_mmio_get_region(s, 2));
-        /* Register 8 MB of ISA IO space */
-        memory_region_add_subregion(get_system_memory(), 0xf2000000,
-                                    sysbus_mmio_get_region(s, 3));
+        /*
+         * Register 8 MB of ISA IO space. mac99 keeps the G4's 0xf2000000.
+         * On the real PowerMac7,3 it's at 0xf0000000, just below the
+         * config registers, and Mac OS X's AGP bridge driver finds those
+         * at the I/O base + 0x800000. There it covers fw_cfg, at CFG_ADDR,
+         * where OpenBIOS looks for it, so it goes below fw_cfg.
+         */
+        if (powermac7_3) {
+            memory_region_add_subregion_overlap(get_system_memory(),
+                                                0xf0000000,
+                                                sysbus_mmio_get_region(s, 3),
+                                                -1);
+        } else {
+            memory_region_add_subregion(get_system_memory(), 0xf2000000,
+                                        sysbus_mmio_get_region(s, 3));
+        }
     } else {
         machine_arch = ARCH_MAC99;
         /* Use values found on a real PowerMac */

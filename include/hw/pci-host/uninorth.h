@@ -30,6 +30,8 @@
 
 /* UniNorth version */
 #define UNINORTH_VERSION_10A    0x7
+/* The AGP Power Mac G5's (PowerMac7,3) U3, as its device-rev says */
+#define U3_VERSION_POWERMAC7_3  0x35
 
 #define TYPE_UNI_NORTH_PCI_HOST_BRIDGE "uni-north-pci-pcihost"
 #define TYPE_UNI_NORTH_AGP_HOST_BRIDGE "uni-north-agp-pcihost"
@@ -60,6 +62,7 @@ struct UNINState {
     SysBusDevice parent_obj;
 
     MemoryRegion mem;
+    uint32_t version;
 };
 
 #define TYPE_UNI_NORTH "uni-north"
