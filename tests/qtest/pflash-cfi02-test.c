@@ -9,6 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "qemu/bswap.h"
 
 /*
  * To test the pflash_cfi02 device, we run QEMU with the sh4 r2d machine with
@@ -613,6 +614,84 @@ static void test_cfi_in_autoselect(const void *opaque)
     qtest_quit(qtest);
 }
 
+/*
+ * A guest's 8-byte load from the flash in CFI query mode. qtest's own reads
+ * are split to the device's maximum access size before they reach it, so
+ * this runs a few SH-4 instructions under TCG, whose 8-byte load (fmov.d with
+ * FPSCR.SZ set) reaches the device as one access. The guest stores what that
+ * load returned, then what two 4-byte loads of the same address return, and
+ * the two must match.
+ */
+#define GUEST_RESULT_ADDR 0x0c900000 /* r2d SDRAM, past the loaded code */
+
+static const uint16_t guest_code[] = {
+    0xd109, /* mov.l   @(0x28,pc),r1  ! r1 = CFI_ADDR in bytes, in P2 */
+    0xe098, /* mov     #0x98,r0 */
+    0x600c, /* extu.b  r0,r0 */
+    0x2101, /* mov.w   r0,@r1         ! enter CFI query mode */
+    0xd208, /* mov.l   @(0x2c,pc),r2  ! r2 = "QRY", at FLASH_ADDR(0x10) */
+    0xd309, /* mov.l   @(0x30,pc),r3  ! r3 = GUEST_RESULT_ADDR, in P2 */
+    0xf3fd, /* fschg                  ! FPSCR.SZ = 1 */
+    0xf028, /* fmov.d  @r2,dr0        ! the 8-byte load */
+    0xf30a, /* fmov.d  dr0,@r3 */
+    0xf3fd, /* fschg                  ! FPSCR.SZ = 0 */
+    0x6422, /* mov.l   @r2,r4 */
+    0x1342, /* mov.l   r4,@(8,r3) */
+    0x7204, /* add     #4,r2 */
+    0x6422, /* mov.l   @r2,r4 */
+    0x1343, /* mov.l   r4,@(12,r3) */
+    0xe401, /* mov     #1,r4 */
+    0x1344, /* mov.l   r4,@(16,r3)    ! done */
+    0xaffe, /* bra     .  */
+    0x0009, /* nop */
+    0x0009, /* nop, so the literals start at 0x28 */
+    0x00aa, 0xa000, /* 0x28: 0xa00000aa */
+    0x0020, 0xa000, /* 0x2c: 0xa0000020 */
+    0x0000, 0xac90, /* 0x30: 0xac900000 */
+};
+
+static void test_guest_8byte_read(const void *opaque)
+{
+    QTestState *qtest;
+    g_autofree char *code_path = NULL;
+    GError *err = NULL;
+    uint8_t res[16];
+    int fd;
+
+    if (!qtest_has_accel("tcg")) {
+        g_test_skip("TCG is not available");
+        return;
+    }
+
+    /* r2d's SH-4 is little-endian. */
+    fd = g_file_open_tmp("qtest-code.XXXXXX", &code_path, &err);
+    g_assert_no_error(err);
+    for (size_t i = 0; i < ARRAY_SIZE(guest_code); i++) {
+        uint16_t insn = cpu_to_le16(guest_code[i]);
+        g_assert(write(fd, &insn, sizeof(insn)) == sizeof(insn));
+    }
+    close(fd);
+
+    qtest = qtest_initf("-M r2d -accel tcg -kernel %s", code_path);
+    for (int i = 0; i < 1000; i++) {
+        if (qtest_readl(qtest, GUEST_RESULT_ADDR + 16) == 1) {
+            break;
+        }
+        g_usleep(10 * 1000);
+    }
+    g_assert_cmphex(qtest_readl(qtest, GUEST_RESULT_ADDR + 16), ==, 1);
+
+    qtest_memread(qtest, GUEST_RESULT_ADDR, res, sizeof(res));
+    /* A 16-bit wide flash returns one CFI byte per 4-byte load. */
+    g_assert_cmphex(ldl_le_p(&res[8]), ==, 'Q');
+    g_assert_cmphex(ldl_le_p(&res[12]), ==, 'Y');
+    /* The 8-byte load returns what the two 4-byte loads did. */
+    g_assert_cmphex(ldq_le_p(&res[0]), ==, ldq_le_p(&res[8]));
+
+    qtest_quit(qtest);
+    unlink(code_path);
+}
+
 static void cleanup(void *opaque)
 {
     unlink(image_path);
@@ -682,6 +761,8 @@ int main(int argc, char **argv)
 
     qtest_add_data_func("pflash-cfi02/cfi-in-autoselect", &configuration[0],
                         test_cfi_in_autoselect);
+    qtest_add_data_func("pflash-cfi02/guest-8byte-read", NULL,
+                        test_guest_8byte_read);
     int result = g_test_run();
     cleanup(NULL);
     return result;

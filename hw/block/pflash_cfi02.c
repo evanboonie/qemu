@@ -734,7 +734,13 @@ static const MemoryRegionOps pflash_cfi02_ops = {
     .read = pflash_read,
     .write = pflash_write,
     .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
+    /*
+     * A 64-bit guest may load 8 bytes at once, for example in a 64-bit
+     * memcpy(). The memory core splits such an access in two.
+     */
+    .valid.max_access_size = 8,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
