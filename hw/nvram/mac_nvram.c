@@ -73,7 +73,12 @@ static const MemoryRegionOps macio_nvram_ops = {
     .read = macio_nvram_readb,
     .write = macio_nvram_writeb,
     .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
+    /*
+     * A 64-bit guest's memcpy() reads with 8-byte loads, as xnu's bcopy
+     * does on a 970. The memory core splits each access into bytes, and
+     * the device is plain bytes, so an 8-byte write is safe too.
+     */
+    .valid.max_access_size = 8,
     .impl.min_access_size = 1,
     .impl.max_access_size = 1,
     .endianness = DEVICE_BIG_ENDIAN,
