@@ -343,6 +343,17 @@ void helper_SLBMTE(CPUPPCState *env, target_ulong rb, target_ulong rs)
 {
     PowerPCCPU *cpu = env_archcpu(env);
 
+    /*
+     * Probe for evanboonie/qemu-g5#18, not for merging: Mac OS X's
+     * handlePF loads the copyin/copyout segment with the faulting
+     * address's low bits still in RB, and the 970 runs it. Ignore
+     * RB's reserved bits on the 970 instead of raising a Program
+     * interrupt.
+     */
+    if (env->mmu_model == POWERPC_MMU_64B) {
+        rb &= SLB_ESID_ESID | SLB_ESID_V | 0xfff;
+    }
+
     if (ppc_store_slb(cpu, rb & 0xfff, rb & ~0xfffULL, rs) < 0) {
         raise_exception_err_ra(env, POWERPC_EXCP_PROGRAM,
                                POWERPC_EXCP_INVAL, GETPC());
