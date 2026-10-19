@@ -300,8 +300,24 @@ static void unin_agp_pci_host_realize(PCIDevice *d, Error **errp)
 
 static void u3_agp_pci_host_realize(PCIDevice *d, Error **errp)
 {
+    int cap;
+
     d->config[PCI_CACHE_LINE_SIZE] = 0x08;
     d->config[PCI_LATENCY_TIMER] = 0x10;
+
+    /*
+     * Probe for evanboonie/qemu-g5#17, not for merging: Mac OS X's
+     * AppleMacRiscAGP fails to configure a bridge with no AGP capability,
+     * and no other driver matches a u3-agp node, so give it one.
+     */
+    cap = pci_add_capability(d, PCI_CAP_ID_AGP, 0x80, PCI_AGP_SIZEOF, errp);
+    if (cap < 0) {
+        return;
+    }
+    d->config[cap + PCI_AGP_VERSION] = 0x20;
+    pci_set_long(d->config + cap + PCI_AGP_STATUS,
+                 PCI_AGP_STATUS_RATE4 | PCI_AGP_STATUS_RATE2 |
+                 PCI_AGP_STATUS_RATE1);
 }
 
 static void unin_internal_pci_host_realize(PCIDevice *d, Error **errp)
