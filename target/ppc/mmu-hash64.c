@@ -1093,6 +1093,15 @@ bool ppc_hash64_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
             cs->exception_index = POWERPC_EXCP_DSEG;
             env->error_code = 0;
             env->spr[SPR_DAR] = eaddr;
+            /*
+             * Probe for evanboonie/qemu-g5#13, not for merging: xnu's
+             * handlePF loads an SLB entry for a DSEG only when DSISR's
+             * translation-miss bit is clear, so don't leave the last
+             * DSI's DSISR behind on the 970.
+             */
+            if (env->excp_model == POWERPC_EXCP_970) {
+                env->spr[SPR_DSISR] = 0;
+            }
             break;
         default:
             g_assert_not_reached();
