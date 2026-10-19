@@ -73,7 +73,13 @@ static const MemoryRegionOps macio_nvram_ops = {
     .read = macio_nvram_readb,
     .write = macio_nvram_writeb,
     .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
+    /*
+     * Probe for evanboonie/qemu-g5#21, not for merging: Mac OS X's
+     * Core99NVRAM copies the NVRAM with bcopy(), which on a 970 uses
+     * ld. Accept 8-byte accesses, split into bytes by .impl, instead
+     * of failing them and returning 0.
+     */
+    .valid.max_access_size = 8,
     .impl.min_access_size = 1,
     .impl.max_access_size = 1,
     .endianness = DEVICE_BIG_ENDIAN,
