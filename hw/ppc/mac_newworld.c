@@ -159,8 +159,8 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     hwaddr nvram_addr = 0xFFF04000;
     /*
      * powermac7_3 takes the real G5's flash NVRAM only when it's given a
-     * file for it. Without one it keeps mac99's macio-nvram, the only way
-     * -prom-env reaches OpenBIOS for now.
+     * file for it. Without one it keeps mac99's macio-nvram, with -prom-env
+     * in the image formatted into it; with one, -prom-env goes to fw_cfg.
      */
     DriveInfo *nvram_flash = powermac7_3 ? drive_get(IF_PFLASH, 0, 0) : NULL;
     uint64_t tbfreq = kvm_enabled() ? kvmppc_get_tbfreq() : TBFREQ;
@@ -524,11 +524,6 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
          * flash unshifted. Created by name, since only qemu-system-ppc64
          * builds pflash_cfi02 in, for powermac7_3.
          */
-        if (nb_prom_envs) {
-            warn_report("powermac7_3: -prom-env is ignored with a pflash "
-                        "NVRAM drive; the OpenBIOS fork doesn't read it from "
-                        "the flash yet");
-        }
         dev = qdev_new(TYPE_PFLASH_CFI02);
         qdev_prop_set_drive(dev, "drive", blk_by_legacy_dinfo(nvram_flash));
         qdev_prop_set_uint32(dev, "num-blocks",
@@ -605,6 +600,31 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_NVRAM_ADDR, nvram_addr);
     if (nvram_flash) {
         fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_NVRAM_FLAT, 1);
+    }
+    if (nvram_flash && nb_prom_envs) {
+        /*
+         * The flash's contents are the guest's and the firmware's, and
+         * QEMU leaves them alone, so -prom-env goes to the firmware in a
+         * file: each "name=value" with its NUL, then one more NUL, as in
+         * the data of a CHRP system partition. The firmware is to set
+         * those variables over the flash's at every boot.
+         */
+        size_t prom_env_size = 1;
+        char *prom_env, *p;
+        unsigned int n;
+
+        for (n = 0; n < nb_prom_envs; n++) {
+            prom_env_size += strlen(prom_envs[n]) + 1;
+        }
+        prom_env = p = g_malloc(prom_env_size);
+        for (n = 0; n < nb_prom_envs; n++) {
+            size_t len = strlen(prom_envs[n]) + 1;
+
+            memcpy(p, prom_envs[n], len);
+            p += len;
+        }
+        *p = '\0';
+        fw_cfg_add_file(fw_cfg, "etc/prom-env", prom_env, prom_env_size);
     }
 
     /* MacOS NDRV VGA driver */

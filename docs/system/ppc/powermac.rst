@@ -23,10 +23,14 @@ Given a 16 KB raw file with ``-drive if=pflash,format=raw,file=nvram.img``,
 ``0xfff04000``, which keeps its contents in the file, in place of
 ``mac99``'s plain NVRAM. An erased flash is a file of ``0xFF`` bytes,
 such as ``head -c 16384 /dev/zero | tr '\0' '\377' > nvram.img``, since
-``truncate`` and ``qemu-img create`` give zeros. The OpenBIOS fork
-doesn't support the flash yet, and ``-prom-env`` reaches OpenBIOS only
-through the plain NVRAM, so without the option the machine keeps that,
-and with it ``-prom-env`` is ignored, with a warning.
+``truncate`` and ``qemu-img create`` give zeros. QEMU leaves the
+flash's contents to the guest and the firmware. With the flash,
+``-prom-env`` goes to the firmware in the fw_cfg file ``etc/prom-env``,
+each ``name=value`` followed by a NUL, then one more NUL, for the
+firmware to set over the flash's variables at every boot. Without the
+flash, ``-prom-env`` is formatted into the plain NVRAM at every start,
+as on ``mac99``. The OpenBIOS fork doesn't drive the flash or read
+``etc/prom-env`` yet.
 
 Supported devices
 -----------------
