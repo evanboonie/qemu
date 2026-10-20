@@ -4,7 +4,8 @@
  * The AGP G5, with U3. For now it's mac99's 970 machine with the PMU
  * fixed on, as the real PowerMac7,3 has a via-pmu, and with a machine ID
  * of its own, ARCH_POWERMAC7_3, so OpenBIOS can describe it as a
- * PowerMac7,3 rather than mac99's PowerMac3,1.
+ * PowerMac7,3 rather than mac99's PowerMac3,1. Its U3 is laid out as the
+ * real one: PCI I/O at 0xf0000000, and version 0x35.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */

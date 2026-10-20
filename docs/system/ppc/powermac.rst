@@ -10,10 +10,13 @@ PowerPC system.
   ``qemu-system-ppc64`` only
 
 ``powermac7_3`` is the machine ``mac99`` builds for a 970, with U3's AGP
-bus, the PMU and a machine ID of its own for the firmware. It takes only
-a 970 CPU. The bundled OpenBIOS doesn't support it, so it needs
-``-bios`` with an OpenBIOS built from the ``g5`` branch of
-https://github.com/evanboonie/openbios, and refuses to start without one.
+bus, the PMU and a machine ID of its own for the firmware. Its U3 is laid
+out as the real PowerMac7,3's: its PCI I/O window is at ``0xf0000000``,
+where ``mac99`` has it at ``0xf2000000``, and its version register reads
+``0x35``. It takes only a 970 CPU. The bundled OpenBIOS doesn't support
+it, so it needs ``-bios`` with an OpenBIOS built from the ``g5`` branch
+of https://github.com/evanboonie/openbios, and refuses to start without
+one.
 
 Supported devices
 -----------------
