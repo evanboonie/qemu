@@ -152,6 +152,7 @@ config MAC_G5
     bool
     default y
     depends on PPC64 && MAC_NEWWORLD
+    select PFLASH_CFI02
 
 config E500
     bool

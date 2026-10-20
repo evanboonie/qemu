@@ -18,6 +18,16 @@ it, so it needs ``-bios`` with an OpenBIOS built from the ``g5`` branch
 of https://github.com/evanboonie/openbios, and refuses to start without
 one.
 
+Given a 16 KB raw file with ``-drive if=pflash,format=raw,file=nvram.img``,
+``powermac7_3``'s NVRAM is the real one's AMD-style flash at
+``0xfff04000``, which keeps its contents in the file, in place of
+``mac99``'s plain NVRAM. An erased flash is a file of ``0xFF`` bytes,
+such as ``head -c 16384 /dev/zero | tr '\0' '\377' > nvram.img``, since
+``truncate`` and ``qemu-img create`` give zeros. The OpenBIOS fork
+doesn't support the flash yet, and ``-prom-env`` reaches OpenBIOS only
+through the plain NVRAM, so without the option the machine keeps that,
+and with it ``-prom-env`` is ignored, with a warning.
+
 Supported devices
 -----------------
 
