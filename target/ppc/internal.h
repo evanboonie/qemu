@@ -302,6 +302,7 @@ bool ppc_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp);
 
 G_NORETURN void powerpc_checkstop(CPUPPCState *env, const char *reason);
 void powerpc_excp(PowerPCCPU *cpu, int excp);
+bool ppc_970_pow_wakes(CPUPPCState *env);
 
 #endif /* !CONFIG_USER_ONLY */
 

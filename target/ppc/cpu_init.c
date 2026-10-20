@@ -5071,6 +5071,21 @@ POWERPC_FAMILY(e600)(ObjectClass *oc, const void *data)
 
 static int check_pow_970(CPUPPCState *env)
 {
+    /*
+     * The 970 keeps nap in HID0's upper word, at IBM bit 9, and not where
+     * earlier CPUs keep it (970FX User's Manual v1.7, Table 2-7; 970MP
+     * User's Manual v2.3, HID0 Bit Functions). Doze and deep nap aren't
+     * modelled.
+     */
+    if (env->spr[SPR_HID0] & HID0_970_NAP) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int check_pow_power5p(CPUPPCState *env)
+{
     if (env->spr[SPR_HID0] & (HID0_DEEPNAP | HID0_DOZE | HID0_NAP)) {
         return 1;
     }
@@ -5078,13 +5093,8 @@ static int check_pow_970(CPUPPCState *env)
     return 0;
 }
 
-static void register_970_hid_sprs(CPUPPCState *env)
+static void register_970_hid1_hid5_sprs(CPUPPCState *env)
 {
-    /* Hardware implementation registers */
-    spr_register(env, SPR_HID0, "HID0",
-                 SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, &spr_write_clear,
-                 0x60000000);
     spr_register(env, SPR_HID1, "HID1",
                  SPR_NOACCESS, SPR_NOACCESS,
                  &spr_read_generic, &spr_write_generic,
@@ -5093,6 +5103,26 @@ static void register_970_hid_sprs(CPUPPCState *env)
                  SPR_NOACCESS, SPR_NOACCESS,
                  &spr_read_generic, &spr_write_generic,
                  POWERPC970_HID5_INIT);
+}
+
+static void register_970_hid_sprs(CPUPPCState *env)
+{
+    /* Hardware implementation registers */
+    spr_register(env, SPR_HID0, "HID0",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_generic,
+                 0x60000000);
+    register_970_hid1_hid5_sprs(env);
+}
+
+static void register_power5p_hid_sprs(CPUPPCState *env)
+{
+    /* Hardware implementation registers */
+    spr_register(env, SPR_HID0, "HID0",
+                 SPR_NOACCESS, SPR_NOACCESS,
+                 &spr_read_generic, &spr_write_clear,
+                 0x60000000);
+    register_970_hid1_hid5_sprs(env);
 }
 
 static void register_970_hior_sprs(CPUPPCState *env)
@@ -6041,7 +6071,7 @@ POWERPC_FAMILY(970)(ObjectClass *oc, const void *data)
     pcc->bfd_mach = bfd_mach_ppc64;
     pcc->flags = POWERPC_FLAG_VRE | POWERPC_FLAG_SE |
                  POWERPC_FLAG_BE | POWERPC_FLAG_PMM |
-                 POWERPC_FLAG_BUS_CLK;
+                 POWERPC_FLAG_BUS_CLK | POWERPC_FLAG_970_NAP;
     pcc->l1_dcache_size = 0x8000;
     pcc->l1_icache_size = 0x10000;
 }
@@ -6054,7 +6084,7 @@ static void init_proc_power5plus(CPUPPCState *env)
     register_book3s_dbg_sprs(env);
 
     /* POWER5+ Specific Registers */
-    register_970_hid_sprs(env);
+    register_power5p_hid_sprs(env);
     register_970_hior_sprs(env);
     register_low_BATs(env);
     register_970_pmu_sup_sprs(env);
@@ -6081,7 +6111,7 @@ POWERPC_FAMILY(POWER5P)(ObjectClass *oc, const void *data)
     dc->fw_name = "PowerPC,POWER5";
     dc->desc = "POWER5+";
     pcc->init_proc = init_proc_power5plus;
-    pcc->check_pow = check_pow_970;
+    pcc->check_pow = check_pow_power5p;
     pcc->check_attn = check_attn_hid0;
     pcc->insns_flags = PPC_INSNS_BASE | PPC_STRING | PPC_MFTB |
                        PPC_FLOAT | PPC_FLOAT_FSEL | PPC_FLOAT_FRES |
@@ -7242,7 +7272,8 @@ static int ppc_cpu_mmu_index(CPUState *cs, bool ifetch)
 #ifndef CONFIG_USER_ONLY
 static bool ppc_cpu_has_work(CPUState *cs)
 {
-    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) ||
+           ppc_970_pow_wakes(cpu_env(cs));
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -7499,6 +7530,24 @@ static const struct SysemuCPUOps ppc_sysemu_ops = {
 #ifdef CONFIG_TCG
 #include "accel/tcg/cpu-ops.h"
 
+#ifndef CONFIG_USER_ONLY
+static bool ppc_cpu_exec_halt(CPUState *cs)
+{
+    CPUPPCState *env = cpu_env(cs);
+
+    if (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD)) {
+        return true;
+    }
+    if (ppc_970_pow_wakes(env)) {
+        /* The 970 clears MSR[POW] when it leaves a power-saving mode. */
+        env->msr &= ~((target_ulong)1 << MSR_POW);
+        hreg_compute_hflags(env);
+        return true;
+    }
+    return false;
+}
+#endif /* !CONFIG_USER_ONLY */
+
 static const TCGCPUOps ppc_tcg_ops = {
   .mttcg_supported = TARGET_LONG_BITS == 64,
   .guest_default_memory_order = 0,
@@ -7514,7 +7563,7 @@ static const TCGCPUOps ppc_tcg_ops = {
   .tlb_fill = ppc_cpu_tlb_fill,
   .pointer_wrap = ppc_pointer_wrap,
   .cpu_exec_interrupt = ppc_cpu_exec_interrupt,
-  .cpu_exec_halt = ppc_cpu_has_work,
+  .cpu_exec_halt = ppc_cpu_exec_halt,
   .cpu_exec_reset = cpu_reset,
   .do_interrupt = ppc_cpu_do_interrupt,
   .cpu_exec_enter = ppc_cpu_exec_enter,

@@ -1,6 +1,6 @@
 /*
  * QTest testcase for the 970's HSPRG0, HSPRG1, DSISR on a data segment
- * interrupt, and slbmte with RB's reserved bits set
+ * interrupt, slbmte with RB's reserved bits set, and nap
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -108,19 +108,115 @@ typedef struct SlbmteCase {
 } SlbmteCase;
 
 /*
- * Run code as mac99's firmware, at the reset vector, with handler at vector
- * in RAM, and wait for the guest to write a nonzero word at R + 0x20.
+ * The nap guests set HID0's nap bit as Mac OS X does, with its 32-bit mask
+ * shifted into the upper word, read HID0 back, and load the decrementer.
+ * They read the decrementer again just before they set MSR[POW], so that
+ * a decrementer that had already run out can't pass for a nap. Then:
+ * - with MSR[EE] set, the CPU naps until the decrementer interrupt, to
+ *   0x900, where the handler is. Each pass of the loop after the mtmsr
+ *   counts at R + 0x08, and a nap never gets there.
+ * - with MSR[EE] clear, the CPU naps until the decrementer runs out, then
+ *   carries on after the mtmsr, without taking the interrupt. There is no
+ *   handler, so taking it would never get to done.
+ * In RAM at R:
+ *   R + 0x00: HID0, as mfspr read it back after the nap bit was set.
+ *   R + 0x08: passes of the loop after the mtmsr (MSR[EE] set).
+ *   R + 0x10: SRR0;  R + 0x20: HID0, as the handler read them (MSR[EE] set).
+ *   R + 0x18: the decrementer after the nap (MSR[EE] clear).
+ *   R + 0x28: MSR after the nap (MSR[EE] clear).
+ *   R + 0x30: 1 once the guest is done.
+ *   R + 0x38: the decrementer just before the mtmsr.
+ */
+#define GUEST_ROM_ADDR 0xfff00000
+#define GUEST_DECR_VECTOR 0x900
+#define HID0_970_NAP 0x0040000000000000ULL
+#define HID0_970_RESET 0x60000000ULL
+#define MSR_POW 0x40000ULL
+
+/* In guest_nap_code, the instruction after the mtmsr. */
+#define GUEST_NAP_RESUME_INDEX 19
+
+static const uint32_t guest_nap_code[] = {
+    0x38800000, /* li      r4,0 */
+    0x64840001, /* oris    r4,r4,1           ! r4 = R */
+    0x3ca00040, /* lis     r5,0x0040 */
+    0x78a507c6, /* sldi    r5,r5,32          ! r5 = HID0_970_NAP */
+    0x7cd0faa6, /* mfspr   r6,1008 */
+    0x7cc62b78, /* or      r6,r6,r5 */
+    0x7cd0fba6, /* mtspr   1008,r6           ! HID0 */
+    0x7cf0faa6, /* mfspr   r7,1008 */
+    0xf8e40000, /* std     r7,0(r4)          ! R + 0x00 */
+    0x39400000, /* li      r10,0 */
+    0x3ca00001, /* lis     r5,1 */
+    0x7cb603a6, /* mtdec   r5                ! 0x10000 ticks */
+    0x7cc000a6, /* mfmsr   r6 */
+    0x60c68000, /* ori     r6,r6,0x8000      ! MSR[EE] */
+    0x64c60004, /* oris    r6,r6,4           ! MSR[POW] */
+    0x7d1602a6, /* mfdec   r8 */
+    0x91040038, /* stw     r8,0x38(r4)       ! R + 0x38 */
+    0x7c0004ac, /* sync */
+    0x7cc00124, /* mtmsr   r6                ! nap */
+    0x4c00012c, /* isync */
+    0x394a0001, /* addi    r10,r10,1 */
+    0xf9440008, /* std     r10,8(r4)         ! R + 0x08 */
+    0x4bfffff8, /* b       .-8 */
+};
+
+static const uint32_t guest_nap_handler[] = {
+    0x7cba02a6, /* mfsrr0  r5 */
+    0xf8a40010, /* std     r5,0x10(r4)       ! R + 0x10 */
+    0x7cb0faa6, /* mfspr   r5,1008 */
+    0xf8a40020, /* std     r5,0x20(r4)       ! R + 0x20 */
+    0x38a00001, /* li      r5,1 */
+    0x90a40030, /* stw     r5,0x30(r4)       ! done */
+    0x48000000, /* b       . */
+};
+
+static const uint32_t guest_nap_ee_off_code[] = {
+    0x38800000, /* li      r4,0 */
+    0x64840001, /* oris    r4,r4,1           ! r4 = R */
+    0x3ca00040, /* lis     r5,0x0040 */
+    0x78a507c6, /* sldi    r5,r5,32          ! r5 = HID0_970_NAP */
+    0x7cd0faa6, /* mfspr   r6,1008 */
+    0x7cc62b78, /* or      r6,r6,r5 */
+    0x7cd0fba6, /* mtspr   1008,r6           ! HID0 */
+    0x7cf0faa6, /* mfspr   r7,1008 */
+    0xf8e40000, /* std     r7,0(r4)          ! R + 0x00 */
+    0x39400000, /* li      r10,0 */
+    0x3ca00001, /* lis     r5,1 */
+    0x7cb603a6, /* mtdec   r5                ! 0x10000 ticks */
+    0x7cc000a6, /* mfmsr   r6 */
+    0x64c60004, /* oris    r6,r6,4           ! MSR[POW], MSR[EE] clear */
+    0x7d1602a6, /* mfdec   r8 */
+    0x91040038, /* stw     r8,0x38(r4)       ! R + 0x38 */
+    0x7c0004ac, /* sync */
+    0x7cc00124, /* mtmsr   r6                ! nap */
+    0x4c00012c, /* isync */
+    0x7cf602a6, /* mfdec   r7 */
+    0x90e40018, /* stw     r7,0x18(r4)       ! R + 0x18 */
+    0x7ce000a6, /* mfmsr   r7 */
+    0xf8e40028, /* std     r7,0x28(r4)       ! R + 0x28 */
+    0x38a00001, /* li      r5,1 */
+    0x90a40030, /* stw     r5,0x30(r4)       ! done */
+    0x48000000, /* b       . */
+};
+
+/*
+ * Run code as mac99's firmware, at the reset vector, with handler, if any,
+ * at vector in RAM, and wait for the guest to write a nonzero word at
+ * R + done_offset.
  */
 static QTestState *run_970_guest(const char *cpu,
                                  const uint32_t *code, size_t code_len,
                                  uint64_t vector,
-                                 const uint32_t *handler, size_t handler_len)
+                                 const uint32_t *handler, size_t handler_len,
+                                 uint64_t done_offset)
 {
     QTestState *qtest;
     GError *err = NULL;
     size_t rom_size = GUEST_CODE_OFFSET + 4 * code_len;
     g_autofree uint8_t *rom = g_malloc0(rom_size);
-    g_autofree uint8_t *vec = g_malloc(4 * handler_len);
+    g_autofree uint8_t *vec = g_malloc0(4 * handler_len + 4);
     char *rom_path;
     int fd;
 
@@ -142,11 +238,13 @@ static QTestState *run_970_guest(const char *cpu,
     /* QEMU has loaded the code by now. */
     unlink(rom_path);
     g_free(rom_path);
-    qtest_memwrite(qtest, vector, vec, 4 * handler_len);
+    if (handler_len) {
+        qtest_memwrite(qtest, vector, vec, 4 * handler_len);
+    }
     qtest_qmp_assert_success(qtest, "{ 'execute': 'cont' }");
 
     for (int i = 0; i < 1000; i++) {
-        if (qtest_readl(qtest, GUEST_RESULT_ADDR + 0x20) != 0) {
+        if (qtest_readl(qtest, GUEST_RESULT_ADDR + done_offset) != 0) {
             break;
         }
         g_usleep(10 * 1000);
@@ -167,7 +265,7 @@ static void test_970_sprs(const void *data)
 
     qtest = run_970_guest(cpu, guest_code, ARRAY_SIZE(guest_code),
                           GUEST_DSEG_VECTOR, guest_dseg_handler,
-                          ARRAY_SIZE(guest_dseg_handler));
+                          ARRAY_SIZE(guest_dseg_handler), 0x20);
     g_assert_cmphex(qtest_readl(qtest, GUEST_RESULT_ADDR + 0x20), ==, 1);
     qtest_memread(qtest, GUEST_RESULT_ADDR, res, sizeof(res));
 
@@ -213,7 +311,7 @@ static void test_970_slbmte(const void *data)
 
     qtest = run_970_guest(c->cpu, code, ARRAY_SIZE(code),
                           GUEST_PROGRAM_VECTOR, guest_program_handler,
-                          ARRAY_SIZE(guest_program_handler));
+                          ARRAY_SIZE(guest_program_handler), 0x20);
     qtest_memread(qtest, GUEST_RESULT_ADDR, res, sizeof(res));
 
     /* No Program interrupt, so SRR0 is still 0 */
@@ -223,6 +321,81 @@ static void test_970_slbmte(const void *data)
     /* Slot 7 holds the ESID and valid bit, with no reserved bits */
     g_assert_cmphex(ldq_be_p(&res[0x00]), ==, SLBMTE_RB_ESID);
     g_assert_cmphex(ldq_be_p(&res[0x08]), ==, SLBMTE_RS);
+
+    qtest_quit(qtest);
+}
+
+static void test_970_nap(const void *data)
+{
+    const char *cpu = data;
+    QTestState *qtest;
+    uint8_t res[0x40];
+
+    if (!qtest_has_accel("tcg")) {
+        g_test_skip("TCG is not available");
+        return;
+    }
+
+    qtest = run_970_guest(cpu, guest_nap_code, ARRAY_SIZE(guest_nap_code),
+                          GUEST_DECR_VECTOR, guest_nap_handler,
+                          ARRAY_SIZE(guest_nap_handler), 0x30);
+    qtest_memread(qtest, GUEST_RESULT_ADDR, res, sizeof(res));
+    g_test_message("HID0 0x%" PRIx64 ", DEC before the mtmsr %" PRId32
+                   ", loop passes %" PRIu64 ", SRR0 0x%" PRIx64
+                   ", handler's HID0 0x%" PRIx64 ", done %" PRIu32,
+                   ldq_be_p(&res[0x00]), (int32_t)ldl_be_p(&res[0x38]),
+                   ldq_be_p(&res[0x08]), ldq_be_p(&res[0x10]),
+                   ldq_be_p(&res[0x20]), (uint32_t)ldl_be_p(&res[0x30]));
+
+    /* HID0 keeps the nap bit. */
+    g_assert_cmphex(ldq_be_p(&res[0x00]), ==, HID0_970_RESET | HID0_970_NAP);
+
+    /* Nothing ran after the mtmsr until the decrementer interrupt. */
+    g_assert_cmphex(ldl_be_p(&res[0x30]), ==, 1);
+    g_assert_cmpint((int32_t)ldl_be_p(&res[0x38]), >, 0);
+    g_assert_cmpuint(ldq_be_p(&res[0x08]), ==, 0);
+    g_assert_cmphex(ldq_be_p(&res[0x10]), ==,
+                    GUEST_ROM_ADDR + GUEST_CODE_OFFSET +
+                    4 * GUEST_NAP_RESUME_INDEX);
+
+    /* The handler sees nap still set. */
+    g_assert_cmphex(ldq_be_p(&res[0x20]), ==, HID0_970_RESET | HID0_970_NAP);
+
+    qtest_quit(qtest);
+}
+
+static void test_970_nap_ee_off(const void *data)
+{
+    const char *cpu = data;
+    QTestState *qtest;
+    uint8_t res[0x40];
+
+    if (!qtest_has_accel("tcg")) {
+        g_test_skip("TCG is not available");
+        return;
+    }
+
+    qtest = run_970_guest(cpu, guest_nap_ee_off_code,
+                          ARRAY_SIZE(guest_nap_ee_off_code),
+                          GUEST_DECR_VECTOR, NULL, 0, 0x30);
+    qtest_memread(qtest, GUEST_RESULT_ADDR, res, sizeof(res));
+    g_test_message("HID0 0x%" PRIx64 ", DEC before the mtmsr %" PRId32
+                   ", DEC after the nap %" PRId32 ", MSR after 0x%" PRIx64
+                   ", done %" PRIu32,
+                   ldq_be_p(&res[0x00]), (int32_t)ldl_be_p(&res[0x38]),
+                   (int32_t)ldl_be_p(&res[0x18]), ldq_be_p(&res[0x28]),
+                   (uint32_t)ldl_be_p(&res[0x30]));
+
+    g_assert_cmphex(ldq_be_p(&res[0x00]), ==, HID0_970_RESET | HID0_970_NAP);
+
+    /*
+     * The CPU carried on after the mtmsr, without taking the interrupt,
+     * only once the decrementer ran out, and with MSR[POW] clear.
+     */
+    g_assert_cmphex(ldl_be_p(&res[0x30]), ==, 1);
+    g_assert_cmpint((int32_t)ldl_be_p(&res[0x38]), >, 0);
+    g_assert_cmpint((int32_t)ldl_be_p(&res[0x18]), <=, 0);
+    g_assert_cmphex(ldq_be_p(&res[0x28]) & MSR_POW, ==, 0);
 
     qtest_quit(qtest);
 }
@@ -238,6 +411,12 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < ARRAY_SIZE(cpus); i++) {
         char *path = g_strdup_printf("ppc970/%s/sprs", cpus[i]);
         qtest_add_data_func(path, cpus[i], test_970_sprs);
+        g_free(path);
+        path = g_strdup_printf("ppc970/%s/nap", cpus[i]);
+        qtest_add_data_func(path, cpus[i], test_970_nap);
+        g_free(path);
+        path = g_strdup_printf("ppc970/%s/nap-ee-off", cpus[i]);
+        qtest_add_data_func(path, cpus[i], test_970_nap_ee_off);
         g_free(path);
 
         for (size_t j = 0; j < ARRAY_SIZE(slbmte_rbs); j++) {

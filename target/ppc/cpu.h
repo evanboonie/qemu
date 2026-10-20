@@ -844,6 +844,8 @@ enum {
     POWERPC_FLAG_BHRB      = 0x01000000,
     /* Use PPE42-specific behavior                                           */
     POWERPC_FLAG_PPE42     = 0x02000000,
+    /* 970 nap: wakes from MSR[POW] with MSR[EE] clear, as Mac OS X expects  */
+    POWERPC_FLAG_970_NAP   = 0x04000000,
 };
 
 /*
@@ -2399,6 +2401,7 @@ void ppc_compat_add_property(Object *obj, const char *name,
 #define HID0_DEEPNAP        (1 << 24)           /* pre-2.06 */
 #define HID0_DOZE           (1 << 23)           /* pre-2.06 */
 #define HID0_NAP            (1 << 22)           /* pre-2.06 */
+#define HID0_970_NAP        PPC_BIT(9)  /* 970 family */
 #define HID0_HILE           PPC_BIT(19) /* POWER8 */
 #define HID0_POWER9_HILE    PPC_BIT(4)
 #define HID0_ENABLE_ATTN    PPC_BIT(31) /* POWER8 */

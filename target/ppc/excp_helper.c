@@ -2304,7 +2304,26 @@ void ppc_maybe_interrupt(CPUPPCState *env)
         cpu_interrupt(cs, CPU_INTERRUPT_HARD);
     } else {
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+        if (ppc_970_pow_wakes(env)) {
+            qemu_cpu_kick(cs);
+        }
     }
+}
+
+/*
+ * A 970 halted by MSR[POW] with MSR[EE] clear wakes on a pending external
+ * or decrementer interrupt. It clears MSR[POW] and carries on at the
+ * instruction after the mtmsr, with the interrupt still pending and not
+ * taken. IBM's manuals call an interrupt while napping with MSR[EE] clear
+ * unpredictable (970FX User's Manual v1.7, section 9.3.2), but Mac OS X
+ * naps briefly that way and expects this.
+ */
+bool ppc_970_pow_wakes(CPUPPCState *env)
+{
+    uint32_t wake = PPC_INTERRUPT_EXT | PPC_INTERRUPT_DECR;
+
+    return (env->flags & POWERPC_FLAG_970_NAP) && env_cpu(env)->halted &&
+           FIELD_EX64(env->msr, MSR, POW) && (env->pending_interrupts & wake);
 }
 
 #ifdef TARGET_PPC64
