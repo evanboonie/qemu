@@ -57,6 +57,8 @@
 #define ID_CPU0                 1
 #define ID_CPU1                 0
 
+/* The firmware, where the 970 enters it (ppc_core99_reset()) */
+#define PROM_BASE               0xfff00000ULL
 #define ROM_CODE_OFFSET         0x100
 #define RESET_VECTOR            0x100
 #define EXT_VECTOR              0x500
@@ -186,19 +188,19 @@ static void map_macio(QTestState *qts)
     u3_config_writel(qts, MACIO_SLOT, PCI_COMMAND, PCI_COMMAND_MEMORY);
 }
 
-/* "info cpus" lists CPU #1 as halted, or not */
-static bool cpu1_halted(QTestState *qts)
+/*
+ * A CPU's NIP, from "info registers <cpu>". Neither "info cpus" nor
+ * query-cpus-fast says whether a CPU is halted, so the tests check that
+ * CPU 1's NIP is still its reset value, where the firmware's own loop
+ * never is, and later that it's in the reset vector's code.
+ */
+static uint64_t cpu_nip(QTestState *qts, int cpu)
 {
-    g_autofree char *cpus = qtest_hmp(qts, "info cpus");
-    char *cpu1 = strstr(cpus, "CPU #1:");
-    char *eol;
+    g_autofree char *regs = qtest_hmp(qts, "info registers %d", cpu);
+    char *nip = strstr(regs, "NIP ");
 
-    g_assert_nonnull(cpu1);
-    eol = strchr(cpu1, '\n');
-    if (eol) {
-        *eol = '\0';
-    }
-    return strstr(cpu1, "(halted)") != NULL;
+    g_assert_nonnull(nip);
+    return g_ascii_strtoull(nip + 4, NULL, 16);
 }
 
 /*
@@ -274,7 +276,7 @@ static void test_two_cpus(void)
     g_usleep(200 * 1000);
     g_assert_cmpuint(qtest_readl(qts, ROM_ENTRY_COUNT), ==, 1);
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU1)), ==, 0);
-    g_assert_true(cpu1_halted(qts));
+    g_assert_cmphex(cpu_nip(qts, 1), ==, PROM_BASE + ROM_CODE_OFFSET);
 
     /* CPU 1's strobe starts CPU 1 at 0x100, and leaves CPU 0 alone */
     strobe_soft_reset(qts, K2_SOFT_RESET_CPU1);
@@ -282,7 +284,8 @@ static void test_two_cpus(void)
     g_usleep(100 * 1000);
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU1)), ==, 1);
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU0)), ==, 0);
-    g_assert_false(cpu1_halted(qts));
+    g_assert_cmphex(cpu_nip(qts, 1), >=, RESET_VECTOR);
+    g_assert_cmphex(cpu_nip(qts, 1), <, RESET_VECTOR + sizeof(reset_code));
 
     /* CPU 0's strobe resets CPU 0 alone */
     strobe_soft_reset(qts, K2_SOFT_RESET_CPU0);
@@ -329,7 +332,7 @@ static void test_soft_reset_after_system_reset(void)
     /* RAM keeps the counts and the vectors; PCI forgets mac-io's BAR */
     qtest_system_reset(qts);
     g_assert_cmpuint(wait_for(qts, ROM_ENTRY_COUNT, 2), ==, 2);
-    g_assert_true(cpu1_halted(qts));
+    g_assert_cmphex(cpu_nip(qts, 1), ==, PROM_BASE + ROM_CODE_OFFSET);
     map_macio(qts);
 
     strobe_soft_reset(qts, K2_SOFT_RESET_CPU1);
