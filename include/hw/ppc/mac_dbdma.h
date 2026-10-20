@@ -163,6 +163,11 @@ struct DBDMAState {
     MemoryRegion mem;
     DBDMA_channel channels[DBDMA_CHANNELS];
     QEMUBH *bh;
+    /*
+     * Where its DMA goes: the PCI address space of the macio device it's
+     * in, set before it's realized, or else system memory
+     */
+    AddressSpace *as;
 };
 
 #define TYPE_MAC_DBDMA "mac-dbdma"

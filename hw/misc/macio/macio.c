@@ -95,6 +95,13 @@ static bool macio_common_realize(PCIDevice *d, Error **errp)
     MacIOState *s = MACIO(d);
     SysBusDevice *sbd;
 
+    /*
+     * DBDMA, and the ATA DMA through it, go through the PCI bus's address
+     * space, which an IOMMU such as powermac7_3's DART can translate. It's
+     * not the bus-master one, so PCI's bus-master enable doesn't gate it,
+     * as it never has. On a bus with no IOMMU it's system memory.
+     */
+    s->dbdma.as = pci_device_iommu_address_space(d);
     if (!qdev_realize(DEVICE(&s->dbdma), BUS(&s->macio_bus), errp)) {
         return false;
     }

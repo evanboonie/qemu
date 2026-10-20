@@ -93,7 +93,7 @@ static void dbdma_cmdptr_load(DBDMA_channel *ch)
 {
     DBDMA_DPRINTFCH(ch, "dbdma_cmdptr_load 0x%08x\n",
                     ch->regs[DBDMA_CMDPTR_LO]);
-    dma_memory_read(&address_space_memory, ch->regs[DBDMA_CMDPTR_LO],
+    dma_memory_read(dbdma_from_ch(ch)->as, ch->regs[DBDMA_CMDPTR_LO],
                     &ch->current, sizeof(dbdma_cmd), MEMTXATTRS_UNSPECIFIED);
 }
 
@@ -103,7 +103,7 @@ static void dbdma_cmdptr_save(DBDMA_channel *ch)
                     ch->regs[DBDMA_CMDPTR_LO],
                     le16_to_cpu(ch->current.xfer_status),
                     le16_to_cpu(ch->current.res_count));
-    dma_memory_write(&address_space_memory, ch->regs[DBDMA_CMDPTR_LO],
+    dma_memory_write(dbdma_from_ch(ch)->as, ch->regs[DBDMA_CMDPTR_LO],
                      &ch->current, sizeof(dbdma_cmd), MEMTXATTRS_UNSPECIFIED);
 }
 
@@ -371,7 +371,7 @@ static void load_word(DBDMA_channel *ch, int key, uint32_t addr,
         return;
     }
 
-    dma_memory_read(&address_space_memory, addr, &current->cmd_dep, len,
+    dma_memory_read(dbdma_from_ch(ch)->as, addr, &current->cmd_dep, len,
                     MEMTXATTRS_UNSPECIFIED);
 
     if (conditional_wait(ch))
@@ -404,7 +404,7 @@ static void store_word(DBDMA_channel *ch, int key, uint32_t addr,
         return;
     }
 
-    dma_memory_write(&address_space_memory, addr, &current->cmd_dep, len,
+    dma_memory_write(dbdma_from_ch(ch)->as, addr, &current->cmd_dep, len,
                      MEMTXATTRS_UNSPECIFIED);
 
     if (conditional_wait(ch))
@@ -916,6 +916,9 @@ static void mac_dbdma_realize(DeviceState *dev, Error **errp)
 {
     DBDMAState *s = MAC_DBDMA(dev);
 
+    if (!s->as) {
+        s->as = &address_space_memory;
+    }
     s->bh = qemu_bh_new_guarded(DBDMA_run_bh, s, &dev->mem_reentrancy_guard);
 }
 
