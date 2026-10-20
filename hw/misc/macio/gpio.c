@@ -97,6 +97,16 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
     }
 }
 
+/*
+ * An output's pin: driven to the data bit while the output is enabled, and
+ * pulled high otherwise, as an open-collector line such as a CPU's SRESET
+ * reads when released.
+ */
+static bool macio_gpio_out_level(uint8_t reg)
+{
+    return !(reg & OUT_ENABLE) || (reg & OUT_DATA);
+}
+
 static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
                              unsigned size)
 {
@@ -111,7 +121,10 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
     }
 
     addr -= 8;
-    if (addr < 36) {
+    if (addr < MACIO_GPIO_NB) {
+        bool old_level = macio_gpio_out_level(s->gpio_regs[addr]);
+        bool new_level;
+
         value &= ~IN_DATA;
 
         if (value & OUT_ENABLE) {
@@ -121,6 +134,11 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
         }
 
         s->gpio_regs[addr] = value | ibit;
+
+        new_level = macio_gpio_out_level(s->gpio_regs[addr]);
+        if (new_level != old_level) {
+            qemu_set_irq(s->gpio_outs[addr], new_level);
+        }
     }
 }
 
@@ -135,7 +153,7 @@ static uint64_t macio_gpio_read(void *opaque, hwaddr addr, unsigned size)
     } else {
         addr -= 8;
 
-        if (addr < 36) {
+        if (addr < MACIO_GPIO_NB) {
             val = s->gpio_regs[addr];
         }
     }
@@ -163,6 +181,8 @@ static void macio_gpio_init(Object *obj)
     for (i = 0; i < 10; i++) {
         sysbus_init_irq(sbd, &s->gpio_extirqs[i]);
     }
+    qdev_init_gpio_out_named(DEVICE(obj), s->gpio_outs, MACIO_GPIO_OUT,
+                             MACIO_GPIO_NB);
 
     memory_region_init_io(&s->gpiomem, OBJECT(s), &macio_gpio_ops, obj,
                           "gpio", 0x30);
@@ -175,7 +195,7 @@ static const VMStateDescription vmstate_macio_gpio = {
     .minimum_version_id = 0,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(gpio_levels, MacIOGPIOState, 8),
-        VMSTATE_UINT8_ARRAY(gpio_regs, MacIOGPIOState, 36),
+        VMSTATE_UINT8_ARRAY(gpio_regs, MacIOGPIOState, MACIO_GPIO_NB),
         VMSTATE_END_OF_LIST()
     }
 };

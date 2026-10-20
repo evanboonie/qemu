@@ -19,10 +19,40 @@
 #include "hw/ppc/ppc.h"
 #include "hw/core/boards.h"
 #include "hw/core/fw-path-provider.h"
+#include "hw/core/irq.h"
+#include "hw/misc/macio/gpio.h"
+#include "target/ppc/cpu.h"
 #include "mac_newworld.h"
+
+/*
+ * Each CPU's SRESET, active low, is a K2 GPIO, which its cpu node's
+ * soft-reset property names: K2 0x71 for cpu@0 and 0x72 for cpu@1, as on
+ * the real PowerMac7,3. In the macio GPIO block, whose registers start at
+ * K2 0x58, those are GPIOs 0x19 and 0x1a. Mac OS X's MacRISC4CPU starts a
+ * CPU by driving its line low and releasing it, back to back
+ * (AppleMacRISC4PE-204.0.9, MacRISC4CPU.cpp:632-658), and the CPU then
+ * takes a system reset to its vector at 0x100.
+ */
+#define POWERMAC7_3_GPIO_SOFT_RESET0    0x19
+#define POWERMAC7_3_MAX_CPUS            2
+
+/*
+ * The falling edge requests the reset, and the release doesn't cancel it:
+ * the CPU may run on another thread and not have taken it yet. It's
+ * cleared once taken, and it wakes a CPU that's powered off or halted.
+ */
+static void powermac7_3_soft_reset(void *opaque, int n, int level)
+{
+    if (!level) {
+        ppc_set_irq(POWERPC_CPU(opaque), PPC_INTERRUPT_RESET, 1);
+    }
+}
 
 static void powermac7_3_init(MachineState *machine)
 {
+    DeviceState *gpio;
+    int i;
+
     /*
      * The bundled openbios-ppc is upstream's, whose entry() indexes its
      * known_arch[] with the machine ID unchecked, so ARCH_POWERMAC7_3 runs
@@ -39,6 +69,14 @@ static void powermac7_3_init(MachineState *machine)
         exit(1);
     }
     ppc_newworld_init(machine, CORE99_VIA_CONFIG_PMU, true);
+
+    gpio = DEVICE(object_resolve_path_type("", TYPE_MACIO_GPIO, NULL));
+    for (i = 0; i < machine->smp.cpus; i++) {
+        qdev_connect_gpio_out_named(gpio, MACIO_GPIO_OUT,
+                                    POWERMAC7_3_GPIO_SOFT_RESET0 + i,
+                                    qemu_allocate_irq(powermac7_3_soft_reset,
+                                                      qemu_get_cpu(i), 0));
+    }
 }
 
 static void powermac7_3_class_init(ObjectClass *oc, const void *data)
@@ -64,6 +102,7 @@ static void powermac7_3_class_init(ObjectClass *oc, const void *data)
     ppc_newworld_machine_class_init(mc, fwc);
     mc->desc = "Power Mac G5 (PowerMac7,3)";
     mc->init = powermac7_3_init;
+    mc->max_cpus = POWERMAC7_3_MAX_CPUS;
     mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("970fx_v3.1");
     mc->valid_cpu_types = valid_cpu_types;
     mc->default_ram_id = "powermac7_3.ram";

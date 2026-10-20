@@ -167,7 +167,11 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
 
     /* init CPUs */
     for (i = 0; i < machine->smp.cpus; i++) {
-        cpu = POWERPC_CPU(cpu_create(machine->cpu_type));
+        cpu = POWERPC_CPU(object_new(machine->cpu_type));
+        /* CPUs other than the boot CPU wait for the OS to reset them */
+        object_property_set_bool(OBJECT(cpu), "start-powered-off", i != 0,
+                                 &error_abort);
+        qdev_realize_and_unref(DEVICE(cpu), NULL, &error_fatal);
         env = &cpu->env;
 
         /* Set time-base frequency to 100 Mhz */
@@ -288,8 +292,8 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     }
 
     openpic_irqs = g_new0(IrqLines, machine->smp.cpus);
-    dev = DEVICE(cpu);
     for (i = 0; i < machine->smp.cpus; i++) {
+        dev = DEVICE(qemu_get_cpu(i));
         /* Mac99 IRQ connection between OpenPIC outputs pins
          * and PowerPC input pins
          */
@@ -414,6 +418,8 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     qdev_prop_set_uint64(dev, "frequency", tbfreq);
     qdev_prop_set_bit(dev, "has-pmu", has_pmu);
     qdev_prop_set_bit(dev, "has-adb", has_adb);
+    qdev_prop_set_uint32(DEVICE(object_resolve_path_component(macio, "pic")),
+                         "nb_cpus", machine->smp.cpus);
 
     dev = DEVICE(object_resolve_path_component(macio, "escc"));
     qdev_prop_set_chr(dev, "chrA", serial_hd(0));
