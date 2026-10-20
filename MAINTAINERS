@@ -1615,6 +1615,7 @@ F: hw/ppc/mac_g5.c
 F: tests/qtest/mac-g5-test.c
 F: tests/qtest/mac-g5-smp-test.c
 F: hw/pci-host/uninorth.c
+F: hw/pci-host/u3_dart.c
 F: hw/misc/macio/
 F: hw/misc/mos6522*.c
 F: hw/nvram/mac_nvram.c
@@ -1625,6 +1626,7 @@ F: include/hw/misc/mos6522.h
 F: include/hw/nvram/mac_nvram.h
 F: include/hw/ppc/mac_dbdma.h
 F: include/hw/pci-host/uninorth.h
+F: include/hw/pci-host/u3_dart.h
 F: include/hw/input/adb*
 F: pc-bios/qemu_vga.ndrv
 F: tests/functional/ppc/test_mac.py

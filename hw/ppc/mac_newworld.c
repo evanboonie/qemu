@@ -66,6 +66,7 @@
 #include "hw/nvram/fw_cfg.h"
 #include "hw/char/escc.h"
 #include "hw/misc/macio/macio.h"
+#include "hw/pci-host/u3_dart.h"
 #include "hw/ppc/openpic.h"
 #include "hw/core/loader.h"
 #include "hw/core/fw-path-provider.h"
@@ -412,6 +413,21 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     /* init basic PC hardware */
     pci_bus = PCI_HOST_BRIDGE(uninorth_pci_dev)->bus;
 
+    /*
+     * powermac7_3's DART, at the real U3's 0xf8033000. Every device on
+     * the U3 bus DMAs through it, macio's DBDMA included, since QEMU puts
+     * the stand-ins for K2's HyperTransport devices there. It translates
+     * only once the guest turns it on, which Mac OS X's AppleDART does
+     * when OpenBIOS gives /u3/dart, as it does when it finds
+     * FW_CFG_PPC_DART set (evanboonie/qemu-g5#82).
+     */
+    if (powermac7_3) {
+        s = SYS_BUS_DEVICE(qdev_new(TYPE_U3_DART));
+        sysbus_realize_and_unref(s, &error_fatal);
+        sysbus_mmio_map(s, 0, U3_DART_BASE);
+        u3_dart_attach_pci_bus(U3_DART(s), pci_bus);
+    }
+
     /* MacIO */
     macio = OBJECT(pci_new(-1, TYPE_NEWWORLD_MACIO));
     dev = DEVICE(macio);
@@ -606,6 +622,9 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_NVRAM_ADDR, nvram_addr);
     if (nvram_flash) {
         fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_NVRAM_FLAT, 1);
+    }
+    if (powermac7_3) {
+        fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_DART, 1);
     }
     if (nvram_flash && nb_prom_envs) {
         /*

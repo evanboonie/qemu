@@ -29,6 +29,10 @@ config UNIN_PCI
     select DEC_PCI
     select OPENPIC
 
+config U3_DART
+    bool
+    select PCI
+
 config PPCE500_PCI
     select PCI
     bool

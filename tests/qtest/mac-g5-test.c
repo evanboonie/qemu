@@ -9,7 +9,8 @@
  * flash NVRAM, which it takes in place of macio-nvram when given a pflash
  * drive, is then erased and programmed as Mac OS X's driver does, and
  * -prom-env reaches the firmware through fw_cfg with it, or through
- * macio-nvram without it.
+ * macio-nvram without it. Last, powermac7_3's DART translates the DMA of
+ * macio's DBDMA engine, on U3's bus, through a table in guest memory.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -28,6 +29,7 @@
 #define FW_CFG_PPC_NVRAM_ADDR   (FW_CFG_ARCH_LOCAL + 0x08)
 #define FW_CFG_PPC_NVRAM_FLAT   (FW_CFG_ARCH_LOCAL + 0x0a)
 #define FW_CFG_PPC_VIACONFIG    (FW_CFG_ARCH_LOCAL + 0x0b)
+#define FW_CFG_PPC_DART         (FW_CFG_ARCH_LOCAL + 0x0c)
 
 /* From hw/ppc/mac_newworld.h */
 #define CORE99_VIA_CONFIG_CUDA  0
@@ -141,7 +143,7 @@ static void check_agp_capability(QTestState *qts)
 
 static QTestState *check_machine(const char *machine, uint16_t machine_id,
                                  uint32_t via_config, uint32_t u3_version,
-                                 const char *io_window,
+                                 uint32_t dart, const char *io_window,
                                  const char *not_io_window)
 {
     QTestState *qts = qtest_initf("-M %s", machine);
@@ -155,6 +157,8 @@ static QTestState *check_machine(const char *machine, uint16_t machine_id,
                     NVRAM_BASE);
     /* No flat key with macio-nvram: fw_cfg reads a missing key as 0 */
     g_assert_cmpuint(qfw_cfg_get_u32(fw_cfg, FW_CFG_PPC_NVRAM_FLAT), ==, 0);
+    /* Whether the machine has a DART, for OpenBIOS's /u3/dart */
+    g_assert_cmpuint(qfw_cfg_get_u32(fw_cfg, FW_CFG_PPC_DART), ==, dart);
     mm_fw_cfg_uninit(fw_cfg);
 
     /* U3's host bridge at device 11, and macio at 12, as on mac99 */
@@ -181,7 +185,7 @@ static void test_powermac7_3(void)
 {
     QTestState *qts = check_machine("powermac7_3", ARCH_POWERMAC7_3,
                                     CORE99_VIA_CONFIG_PMU,
-                                    U3_VERSION_POWERMAC7_3,
+                                    U3_VERSION_POWERMAC7_3, 1,
                                     IO_WINDOW_POWERMAC7_3, IO_WINDOW_MAC99);
 
     check_mtree(qts, NVRAM_MACIO, NVRAM_FLASH);
@@ -193,7 +197,7 @@ static void test_mac99_970(void)
 {
     QTestState *qts = check_machine("mac99 -cpu 970fx", ARCH_MAC99_U3,
                                     CORE99_VIA_CONFIG_CUDA,
-                                    UNINORTH_VERSION_10A, IO_WINDOW_MAC99,
+                                    UNINORTH_VERSION_10A, 0, IO_WINDOW_MAC99,
                                     IO_WINDOW_POWERMAC7_3);
 
     check_mtree(qts, NVRAM_MACIO, NVRAM_FLASH);
@@ -465,6 +469,160 @@ static void test_powermac7_3_prom_env(void)
     qtest_quit(qts);
 }
 
+/*
+ * powermac7_3's DART (hw/pci-host/u3_dart.c), and macio's DBDMA engine
+ * as the device whose DMA it translates. DBDMA fetches its commands, writes
+ * their status back, and does a STORE_WORD's write, all by DMA, so each
+ * of those goes through the DART.
+ */
+#define DART_BASE               0xf8033000
+#define DART_CNTL               (DART_BASE + 0x0)
+#define DART_EXCP               (DART_BASE + 0x10)
+#define DART_CNTL_IDARTTLB      (1u << 10)
+#define DART_CNTL_DARTEN        (1u << 9)
+#define DART_ENTRY_VALID        0x80000000u
+
+/* macio at device 12, its BAR in U3's PCI hole, and DBDMA's channel 0 */
+#define MACIO_SLOT              12
+#define MACIO_BAR               0x80000000
+#define DBDMA_CH0               (MACIO_BAR + 0x8000)
+#define DBDMA_CONTROL           0x00
+#define DBDMA_STATUS            0x04
+#define DBDMA_CMDPTR_LO         0x0c
+#define DBDMA_RUN               0x8000
+#define DBDMA_ACTIVE            0x0400
+#define DBDMA_STORE_WORD        0x4000
+#define DBDMA_STOP              0x7000
+#define DBDMA_KEY_SYSTEM        0x0600
+
+/* Physical pages in the guest's 256 MB, and bus pages the DART maps */
+#define DART_TABLE_PA           0x00800000      /* 2 MB, 512 pages */
+#define CMD_PA                  0x00c00000
+#define TARGET_PA               0x00d00000
+#define FAR_PA                  0x00f00000
+#define PLAIN_PA                0x00e00000
+#define CMD_BUS                 0x00100000
+#define TARGET_BUS              0x00200000
+#define INVALID_BUS             0x00300000
+#define FAR_BUS                 0x00500000
+
+static void dbdma_writel(QTestState *qts, uint32_t reg, uint32_t val)
+{
+    qtest_writel(qts, DBDMA_CH0 + reg, bswap32(val));
+}
+
+static uint32_t dbdma_readl(QTestState *qts, uint32_t reg)
+{
+    return bswap32(qtest_readl(qts, DBDMA_CH0 + reg));
+}
+
+static void dart_set_entry(QTestState *qts, uint32_t bus, uint32_t pa)
+{
+    qtest_writel(qts, DART_TABLE_PA + (bus >> 12) * 4,
+                 DART_ENTRY_VALID | (pa >> 12));
+}
+
+/*
+ * Put a STORE_WORD of "data" to bus address "to", then a STOP, at physical
+ * CMD_PA, and run them from bus address "cmd_bus". The commands are
+ * little-endian.
+ */
+static void dbdma_store_word(QTestState *qts, uint32_t cmd_bus, uint32_t to,
+                             uint32_t data)
+{
+    uint8_t cmds[32] = { 0 };
+    int i;
+
+    stw_le_p(&cmds[0], 4);                       /* req_count */
+    stw_le_p(&cmds[2], DBDMA_STORE_WORD | DBDMA_KEY_SYSTEM);
+    stl_le_p(&cmds[4], to);                      /* phy_addr */
+    stl_le_p(&cmds[8], data);                    /* cmd_dep */
+    stw_le_p(&cmds[18], DBDMA_STOP);
+    qtest_memwrite(qts, CMD_PA, cmds, sizeof(cmds));
+
+    dbdma_writel(qts, DBDMA_CONTROL, DBDMA_RUN << 16);
+    dbdma_writel(qts, DBDMA_CMDPTR_LO, cmd_bus);
+    dbdma_writel(qts, DBDMA_CONTROL, DBDMA_RUN << 16 | DBDMA_RUN);
+
+    /* The channel runs in a bottom half, and goes idle at the STOP */
+    for (i = 0; i < 1000; i++) {
+        if (!(dbdma_readl(qts, DBDMA_STATUS) & DBDMA_ACTIVE)) {
+            break;
+        }
+        qtest_clock_step(qts, 1000);
+    }
+    g_assert_false(dbdma_readl(qts, DBDMA_STATUS) & DBDMA_ACTIVE);
+}
+
+static uint32_t read_le32(QTestState *qts, uint64_t addr)
+{
+    uint8_t b[4];
+
+    qtest_memread(qts, addr, b, sizeof(b));
+    return ldl_le_p(b);
+}
+
+static void test_powermac7_3_dart(void)
+{
+    QTestState *qts = qtest_init("-M powermac7_3 -m 256M");
+    uint32_t table_cntl = (DART_TABLE_PA >> 12) << 12;
+
+    /* macio's BAR, with memory decoding on; bus mastering stays off */
+    u3_config_writel(qts, MACIO_SLOT, PCI_BASE_ADDRESS_0, MACIO_BAR);
+    u3_config_writel(qts, MACIO_SLOT, PCI_COMMAND, PCI_COMMAND_MEMORY);
+
+    /* Off at reset, and the exception register reads 0 */
+    g_assert_cmphex(qtest_readl(qts, DART_CNTL), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, DART_EXCP), ==, 0);
+
+    /* Off, a bus address is the physical one */
+    dbdma_store_word(qts, CMD_PA, PLAIN_PA, 0x11223344);
+    g_assert_cmphex(read_le32(qts, PLAIN_PA), ==, 0x11223344);
+
+    /*
+     * On, with a 512-page table, written as size 0, as Mac OS X's AppleDART
+     * and Linux write it. The invalidation reads back as done at once.
+     */
+    qtest_memset(qts, DART_TABLE_PA, 0, 512 * 4096);
+    dart_set_entry(qts, CMD_BUS, CMD_PA);
+    dart_set_entry(qts, TARGET_BUS, TARGET_PA);
+    qtest_writel(qts, DART_CNTL, table_cntl | DART_CNTL_DARTEN |
+                 DART_CNTL_IDARTTLB);
+    g_assert_cmphex(qtest_readl(qts, DART_CNTL), ==,
+                    table_cntl | DART_CNTL_DARTEN);
+
+    /*
+     * The commands come from bus page CMD_BUS, so from CMD_PA, and the
+     * word lands on TARGET_BUS's page, not at the bus address itself.
+     * The STORE_WORD's status, written back by DMA, lands at CMD_PA too.
+     */
+    dbdma_store_word(qts, CMD_BUS, TARGET_BUS + 0x10, 0x55667788);
+    g_assert_cmphex(read_le32(qts, TARGET_PA + 0x10), ==, 0x55667788);
+    g_assert_cmphex(read_le32(qts, TARGET_BUS + 0x10), ==, 0);
+    g_assert_cmphex(read_le32(qts, CMD_PA + 12) >> 16, !=, 0);
+
+    /* An invalid entry: nothing is written, there or at its bus address */
+    dbdma_store_word(qts, CMD_BUS, INVALID_BUS, 0x99aabbcc);
+    g_assert_cmphex(read_le32(qts, INVALID_BUS), ==, 0);
+    g_assert_cmphex(read_le32(qts, TARGET_PA), ==, 0);
+
+    /*
+     * A one-page table maps 4 MB of bus addresses. FAR_BUS is past that,
+     * so its entry, valid as it is, isn't used.
+     */
+    dart_set_entry(qts, FAR_BUS, FAR_PA);
+    qtest_writel(qts, DART_CNTL, table_cntl | DART_CNTL_DARTEN | 1);
+    dbdma_store_word(qts, CMD_BUS, FAR_BUS, 0xddeeff00);
+    g_assert_cmphex(read_le32(qts, FAR_PA), ==, 0);
+    g_assert_cmphex(read_le32(qts, FAR_BUS), ==, 0);
+
+    /* Off again at reset */
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, DART_CNTL), ==, 0);
+
+    qtest_quit(qts);
+}
+
 int main(int argc, char *argv[])
 {
     g_test_init(&argc, &argv, NULL);
@@ -474,6 +632,7 @@ int main(int argc, char *argv[])
         qtest_add_func("mac-g5/powermac7_3/nvram", test_powermac7_3_nvram);
         qtest_add_func("mac-g5/powermac7_3/prom-env",
                        test_powermac7_3_prom_env);
+        qtest_add_func("mac-g5/powermac7_3/dart", test_powermac7_3_dart);
     }
     if (qtest_has_machine("mac99")) {
         qtest_add_func("mac-g5/mac99-970", test_mac99_970);
