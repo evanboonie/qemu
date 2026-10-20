@@ -48,6 +48,12 @@ unin_data_read(uint64_t addr, unsigned len, uint64_t val) "read addr 0x%"PRIx64 
 unin_write(uint64_t addr, uint64_t value) "addr=0x%" PRIx64 " val=0x%"PRIx64
 unin_read(uint64_t addr, uint64_t value) "addr=0x%" PRIx64 " val=0x%"PRIx64
 
+# u3_dart.c
+u3_dart_read(uint64_t addr, uint64_t val) "addr 0x%"PRIx64" val 0x%"PRIx64
+u3_dart_write(uint64_t addr, uint64_t val) "addr 0x%"PRIx64" val 0x%"PRIx64
+u3_dart_translate(uint64_t addr, const char *dir, uint32_t entry, uint64_t pa) "bus 0x%"PRIx64" %s entry 0x%08"PRIx32" -> 0x%"PRIx64
+u3_dart_fault(uint64_t addr, const char *dir, uint32_t entry) "bus 0x%"PRIx64" %s entry 0x%08"PRIx32
+
 # ppc4xx_pci.c
 ppc4xx_pci_map_irq(int32_t devfn, int irq_num, int slot) "devfn 0x%x irq %d -> %d"
 ppc4xx_pci_set_irq(int irq_num) "PCI irq %d"
