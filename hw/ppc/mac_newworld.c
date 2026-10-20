@@ -53,7 +53,9 @@
 #include "exec/target_page.h"
 #include "hw/ppc/ppc.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/block/flash.h"
 #include "hw/nvram/mac_nvram.h"
+#include "system/blockdev.h"
 #include "hw/core/boards.h"
 #include "hw/pci-host/uninorth.h"
 #include "hw/input/adb.h"
@@ -91,6 +93,10 @@
 
 #define KERNEL_LOAD_ADDR 0x01000000
 #define KERNEL_GAP       0x00100000
+
+/* powermac7_3's flash NVRAM: two banks, each one sector */
+#define POWERMAC7_3_NVRAM_SIZE      (16 * KiB)
+#define POWERMAC7_3_NVRAM_BANK_SIZE (8 * KiB)
 
 #define TYPE_CORE99_MACHINE MACHINE_TYPE_NAME("mac99")
 typedef struct Core99MachineState Core99MachineState;
@@ -136,6 +142,7 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     int i, j, k, ppc_boot_device, machine_arch, bios_size = -1;
     const char *bios_name = machine->firmware ?: PROM_FILENAME;
     MemoryRegion *bios = g_new(MemoryRegion, 1);
+    AddressSpace *bios_as = NULL;    /* NULL: the system's */
     hwaddr kernel_base = 0, initrd_base = 0, cmdline_base = 0;
     long kernel_size = 0, initrd_size = 0;
     PCIBus *pci_bus;
@@ -150,6 +157,12 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     DeviceState *dev, *pic_dev, *uninorth_pci_dev;
     DeviceState *uninorth_internal_dev = NULL, *uninorth_agp_dev = NULL;
     hwaddr nvram_addr = 0xFFF04000;
+    /*
+     * powermac7_3 takes the real G5's flash NVRAM only when it's given a
+     * file for it. Without one it keeps mac99's macio-nvram, the only way
+     * -prom-env reaches OpenBIOS for now.
+     */
+    DriveInfo *nvram_flash = powermac7_3 ? drive_get(IF_PFLASH, 0, 0) : NULL;
     uint64_t tbfreq = kvm_enabled() ? kvmppc_get_tbfreq() : TBFREQ;
 
     /* init CPUs */
@@ -174,17 +187,52 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
                            &error_fatal);
     memory_region_add_subregion(get_system_memory(), PROM_BASE, bios);
 
+    if (nvram_flash) {
+        /*
+         * The ROM loader writes through the address space it loads to, at
+         * the first reset, into whatever is mapped there. powermac7_3's
+         * flash NVRAM lies inside the ROM's range (unless KVM moves it to
+         * 0xFFE00000, below), and OpenBIOS's image covers it, so loading
+         * it into the system's address space would write the image into
+         * the flash's storage, and past its end too, since
+         * address_space_write_rom() clamps a write to its section for RAM
+         * only, not for a ROM device. So load
+         * the firmware through an address space that sees the system's
+         * memory below 4 GB, except that the ROM's own range goes to the
+         * ROM alone. Any segment outside the ROM still lands where it
+         * would, and the NVRAM hides its part of the ROM, as on the real
+         * G5, whose NVRAM is part of its boot ROM.
+         */
+        MemoryRegion *bios_view = g_new(MemoryRegion, 1);
+        MemoryRegion *system_alias = g_new(MemoryRegion, 1);
+        MemoryRegion *bios_alias = g_new(MemoryRegion, 1);
+
+        memory_region_init(bios_view, NULL, "powermac7_3.bios-view",
+                           PROM_BASE + PROM_SIZE);
+        memory_region_init_alias(system_alias, NULL,
+                                 "powermac7_3.bios-view-system",
+                                 get_system_memory(), 0,
+                                 PROM_BASE + PROM_SIZE);
+        memory_region_add_subregion_overlap(bios_view, 0, system_alias, 0);
+        memory_region_init_alias(bios_alias, NULL, "powermac7_3.bios-alias",
+                                 bios, 0, PROM_SIZE);
+        memory_region_add_subregion_overlap(bios_view, PROM_BASE, bios_alias,
+                                            1);
+        bios_as = g_new(AddressSpace, 1);
+        address_space_init(bios_as, bios_view, "powermac7_3.bios");
+    }
+
     filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
     if (filename) {
         /* Load OpenBIOS (ELF) */
-        bios_size = load_elf(filename, NULL, NULL, NULL, NULL,
-                             NULL, NULL, NULL,
-                             ELFDATA2MSB, PPC_ELF_MACHINE, 0, 0);
+        bios_size = load_elf_as(filename, NULL, NULL, NULL, NULL,
+                                NULL, NULL, NULL,
+                                ELFDATA2MSB, PPC_ELF_MACHINE, 0, 0, bios_as);
 
         if (bios_size <= 0) {
             /* or load binary ROM image */
-            bios_size = load_image_targphys(filename, PROM_BASE, PROM_SIZE,
-                                            &error_fatal);
+            bios_size = load_image_targphys_as(filename, PROM_BASE, PROM_SIZE,
+                                               bios_as, &error_fatal);
         }
         g_free(filename);
     }
@@ -466,13 +514,46 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
            move the NVRAM out of ROM again for KVM */
         nvram_addr = 0xFFE00000;
     }
-    dev = qdev_new(TYPE_MACIO_NVRAM);
-    qdev_prop_set_uint32(dev, "size", MACIO_NVRAM_SIZE);
-    qdev_prop_set_uint32(dev, "it_shift", 1);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, nvram_addr);
-    nvr = MACIO_NVRAM(dev);
-    pmac_format_nvram_partition(nvr, MACIO_NVRAM_SIZE);
+    if (nvram_flash) {
+        /*
+         * The real PowerMac7,3's NVRAM is 16 KB of AMD-style flash, as two
+         * 8 KB banks that Mac OS X's AppleFlashNVRAMAMD erases and programs
+         * one at a time, so each bank is a sector of its own. The driver
+         * sends its unlock cycles to a bank's base + 0x555 and + 0x2AA,
+         * one byte wide, and doesn't read the IDs. The firmware reads the
+         * flash unshifted. Created by name, since only qemu-system-ppc64
+         * builds pflash_cfi02 in, for powermac7_3.
+         */
+        if (nb_prom_envs) {
+            warn_report("powermac7_3: -prom-env is ignored with a pflash "
+                        "NVRAM drive; the OpenBIOS fork doesn't read it from "
+                        "the flash yet");
+        }
+        dev = qdev_new(TYPE_PFLASH_CFI02);
+        qdev_prop_set_drive(dev, "drive", blk_by_legacy_dinfo(nvram_flash));
+        qdev_prop_set_uint32(dev, "num-blocks",
+                             POWERMAC7_3_NVRAM_SIZE /
+                             POWERMAC7_3_NVRAM_BANK_SIZE);
+        qdev_prop_set_uint32(dev, "sector-length",
+                             POWERMAC7_3_NVRAM_BANK_SIZE);
+        qdev_prop_set_uint8(dev, "width", 1);
+        qdev_prop_set_uint8(dev, "big-endian", 1);
+        qdev_prop_set_uint16(dev, "id0", 0x01);    /* AMD */
+        qdev_prop_set_uint16(dev, "id1", 0x37);    /* amd-0137 */
+        qdev_prop_set_uint16(dev, "unlock-addr0", 0x555);
+        qdev_prop_set_uint16(dev, "unlock-addr1", 0x2aa);
+        qdev_prop_set_string(dev, "name", "powermac7_3.nvram");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, nvram_addr);
+    } else {
+        dev = qdev_new(TYPE_MACIO_NVRAM);
+        qdev_prop_set_uint32(dev, "size", MACIO_NVRAM_SIZE);
+        qdev_prop_set_uint32(dev, "it_shift", 1);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, nvram_addr);
+        nvr = MACIO_NVRAM(dev);
+        pmac_format_nvram_partition(nvr, MACIO_NVRAM_SIZE);
+    }
     /* No PCI init: the BIOS will do it */
 
     dev = qdev_new(TYPE_FW_CFG_MEM);
@@ -522,6 +603,9 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_CLOCKFREQ, CLOCKFREQ);
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_BUSFREQ, BUSFREQ);
     fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_NVRAM_ADDR, nvram_addr);
+    if (nvram_flash) {
+        fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_NVRAM_FLAT, 1);
+    }
 
     /* MacOS NDRV VGA driver */
     filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, NDRV_VGA_FILENAME);

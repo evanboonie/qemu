@@ -5,7 +5,10 @@
  * fixed on, as the real PowerMac7,3 has a via-pmu, and with a machine ID
  * of its own, ARCH_POWERMAC7_3, so OpenBIOS can describe it as a
  * PowerMac7,3 rather than mac99's PowerMac3,1. Its U3 is laid out as the
- * real one: PCI I/O at 0xf0000000, and version 0x35.
+ * real one: PCI I/O at 0xf0000000, and version 0x35. Given -drive
+ * if=pflash, its NVRAM is the real one's 16 KB of AMD-style flash at
+ * 0xfff04000, a pflash_cfi02, in place of mac99's macio-nvram.
+ * ppc_newworld_init() builds both.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
