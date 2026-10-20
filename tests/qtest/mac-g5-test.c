@@ -7,7 +7,9 @@
  * bridge's AGP capability, and where its NVRAM is. mac99's 970 path is
  * checked the same way, since the two share their init. powermac7_3's
  * flash NVRAM, which it takes in place of macio-nvram when given a pflash
- * drive, is then erased and programmed as Mac OS X's driver does.
+ * drive, is then erased and programmed as Mac OS X's driver does, and
+ * -prom-env reaches the firmware through fw_cfg with it, or through
+ * macio-nvram without it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -376,6 +378,93 @@ static void test_powermac7_3_nvram(void)
     unlink(path);
 }
 
+/*
+ * -prom-env, as QEMU hands it to the firmware: each "name=value" with its
+ * NUL, then one more NUL, the data of a CHRP system partition
+ */
+#define PROM_ENV_ARGS   "-prom-env \"auto-boot?=true\" " \
+                        "-prom-env \"boot-args=-v serial=1\""
+static const char prom_env[] = "auto-boot?=true\0boot-args=-v serial=1\0";
+
+/* macio-nvram's first CHRP partition, the system one QEMU formats */
+#define CHRP_HEADER_SIZE        16
+#define CHRP_NVPART_SYSTEM      0x70
+
+static char *make_erased_nvram(void)
+{
+    g_autofree uint8_t *file = g_malloc(NVRAM_SIZE);
+    g_autoptr(GError) err = NULL;
+    char *path = NULL;
+    int fd;
+
+    memset(file, 0xff, NVRAM_SIZE);
+    fd = g_file_open_tmp("qtest-powermac7_3-prom-env-XXXXXX", &path, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(write(fd, file, NVRAM_SIZE), ==, NVRAM_SIZE);
+    close(fd);
+    return path;
+}
+
+static size_t get_prom_env_file(QTestState *qts, char *buf, size_t size)
+{
+    QFWCFG *fw_cfg = mm_fw_cfg_init(qts, NEWWORLD_FW_CFG_BASE);
+    size_t len = qfw_cfg_get_file(fw_cfg, "etc/prom-env", buf, size);
+
+    mm_fw_cfg_uninit(fw_cfg);
+    return len;
+}
+
+/*
+ * With the flash, -prom-env goes to fw_cfg's etc/prom-env, exactly as
+ * given, and the flash's file is left as it was. With the flash and no
+ * -prom-env, or with -prom-env and no flash, there's no such file, and
+ * without the flash -prom-env is in macio-nvram's system partition, as
+ * on mac99.
+ */
+static void test_powermac7_3_prom_env(void)
+{
+    g_autofree char *path = make_erased_nvram();
+    g_autofree char *contents = NULL;
+    g_autofree uint8_t *blank = g_malloc(NVRAM_SIZE);
+    g_autoptr(GError) err = NULL;
+    char buf[256];
+    uint8_t part[CHRP_HEADER_SIZE + sizeof(prom_env)];
+    QTestState *qts;
+    size_t len;
+    gsize file_len;
+
+    qts = qtest_initf("-M powermac7_3 "
+                      "-drive if=pflash,format=raw,file=%s " PROM_ENV_ARGS,
+                      path);
+    len = get_prom_env_file(qts, buf, sizeof(buf));
+    g_assert_cmpuint(len, ==, sizeof(prom_env));
+    g_assert_cmpmem(buf, len, prom_env, sizeof(prom_env));
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(path, &contents, &file_len, &err));
+    g_assert_no_error(err);
+    memset(blank, 0xff, NVRAM_SIZE);
+    g_assert_cmpmem(contents, file_len, blank, NVRAM_SIZE);
+
+    qts = qtest_initf("-M powermac7_3 "
+                      "-drive if=pflash,format=raw,file=%s", path);
+    g_assert_cmpuint(get_prom_env_file(qts, buf, sizeof(buf)), ==, 0);
+    qtest_quit(qts);
+    unlink(path);
+
+    qts = qtest_init("-M powermac7_3 " PROM_ENV_ARGS);
+    g_assert_cmpuint(get_prom_env_file(qts, buf, sizeof(buf)), ==, 0);
+    /* macio-nvram stores a byte at every other address */
+    for (size_t i = 0; i < sizeof(part); i++) {
+        part[i] = qtest_readb(qts, NVRAM_BASE + (i << 1));
+    }
+    g_assert_cmphex(part[0], ==, CHRP_NVPART_SYSTEM);
+    g_assert_cmpstr((char *)&part[4], ==, "system");
+    g_assert_cmpmem(&part[CHRP_HEADER_SIZE], sizeof(prom_env),
+                    prom_env, sizeof(prom_env));
+    qtest_quit(qts);
+}
+
 int main(int argc, char *argv[])
 {
     g_test_init(&argc, &argv, NULL);
@@ -383,6 +472,8 @@ int main(int argc, char *argv[])
     if (qtest_has_machine("powermac7_3")) {
         qtest_add_func("mac-g5/powermac7_3", test_powermac7_3);
         qtest_add_func("mac-g5/powermac7_3/nvram", test_powermac7_3_nvram);
+        qtest_add_func("mac-g5/powermac7_3/prom-env",
+                       test_powermac7_3_prom_env);
     }
     if (qtest_has_machine("mac99")) {
         qtest_add_func("mac-g5/mac99-970", test_mac99_970);
