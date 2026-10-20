@@ -15,6 +15,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "system/qtest.h"
 #include "hw/ppc/ppc.h"
 #include "hw/core/boards.h"
@@ -39,7 +40,10 @@
 /*
  * The falling edge requests the reset, and the release doesn't cancel it:
  * the CPU may run on another thread and not have taken it yet. It's
- * cleared once taken, and it wakes a CPU that's powered off or halted.
+ * cleared once taken, and it wakes a CPU that's powered off. A 970 halted
+ * in power-save (MSR[POW] set) that takes it aborts QEMU instead
+ * (powerpc_excp_books(), target/ppc/excp_helper.c), which isn't handled
+ * yet (evanboonie/qemu-g5#94).
  */
 static void powermac7_3_soft_reset(void *opaque, int n, int level)
 {
@@ -70,7 +74,8 @@ static void powermac7_3_init(MachineState *machine)
     }
     ppc_newworld_init(machine, CORE99_VIA_CONFIG_PMU, true);
 
-    gpio = DEVICE(object_resolve_path_type("", TYPE_MACIO_GPIO, NULL));
+    gpio = DEVICE(object_resolve_type_unambiguous(TYPE_MACIO_GPIO,
+                                                  &error_abort));
     for (i = 0; i < machine->smp.cpus; i++) {
         qdev_connect_gpio_out_named(gpio, MACIO_GPIO_OUT,
                                     POWERMAC7_3_GPIO_SOFT_RESET0 + i,

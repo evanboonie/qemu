@@ -204,6 +204,13 @@ static void macio_gpio_reset(DeviceState *dev)
 {
     MacIOGPIOState *s = MACIO_GPIO(dev);
 
+    /*
+     * Every output starts disabled, so a line such as a CPU's soft reset
+     * reads released after any machine reset, and the next strobe makes
+     * a falling edge.
+     */
+    memset(s->gpio_regs, 0, sizeof(s->gpio_regs));
+
     /* GPIO 1 is up by default */
     macio_set_gpio(s, 1, true);
 }

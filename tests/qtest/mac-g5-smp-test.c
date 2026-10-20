@@ -5,8 +5,9 @@
  * X's MacRISC4CPU::startCPU drives it, takes it to its system reset vector
  * at 0x100 (AppleMacRISC4PE-204.0.9, MacRISC4CPU.cpp:422, :632-658). Each
  * CPU has its own MPIC outputs, so an IPI reaches only the CPUs it's sent
- * to. A few instructions run under TCG as the firmware, so no OpenBIOS
- * runs, and the test maps mac-io's registers itself.
+ * to, and a machine reset releases the soft-reset lines. A few
+ * instructions run under TCG as the firmware, so no OpenBIOS runs, and the
+ * test maps mac-io's registers itself.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -45,7 +46,9 @@
  *   R + 0x40 + 4 * id: how many times a CPU took a system reset to 0x100.
  *   R + 0x80 + 4 * id: how many times a CPU took an external interrupt.
  * id is r20: 1 on CPU 0, which sets it in the firmware, and 0 on CPU 1,
- * which never runs the firmware and has r20 clear from reset.
+ * which never runs the firmware. CPU 1's r20 is 0 because the CPU object
+ * is zero-filled when it's created: QEMU's ppc CPU reset leaves the GPRs
+ * alone.
  */
 #define GUEST_RESULT_ADDR       0x10000
 #define ROM_ENTRY_COUNT         (GUEST_RESULT_ADDR + 0x10)
@@ -96,7 +99,13 @@ static const uint32_t reset_code[] = {
     0x48000000, /* b       . */
 };
 
-/* At 0x500: count the interrupt, and stay with MSR[EE] clear */
+/*
+ * At 0x500: count the interrupt, acknowledge it and end it through the
+ * MPIC's registers for the current CPU (IACK and EOI, at MPIC_BASE + 0xa0
+ * and + 0xb0), and return to the loop, whose MSR[EE] is set again from
+ * SRR1. So each CPU keeps taking external interrupts between IPIs, and an
+ * IPI that reached the wrong CPU would be counted there.
+ */
 static const uint32_t ext_code[] = {
     0x38800000, /* li      r4,0 */
     0x64840001, /* oris    r4,r4,1           ! R */
@@ -105,7 +114,15 @@ static const uint32_t ext_code[] = {
     0x80c40080, /* lwz     r6,0x80(r4) */
     0x38c60001, /* addi    r6,r6,1 */
     0x90c40080, /* stw     r6,0x80(r4)       ! R + 0x80 + 4 * id */
-    0x48000000, /* b       . */
+    0x39200000, /* li      r9,0 */
+    0x65298004, /* oris    r9,r9,0x8004 */
+    0x612900a0, /* ori     r9,r9,0xa0        ! MPIC_BASE + 0xa0 */
+    0x7d404c2c, /* lwbrx   r10,0,r9          ! IACK */
+    0x39600000, /* li      r11,0 */
+    0x39290010, /* addi    r9,r9,0x10 */
+    0x7d604d2c, /* stwbrx  r11,0,r9          ! EOI */
+    0x7c0004ac, /* sync */
+    0x4c000024, /* rfid */
 };
 
 static void write_code(QTestState *qts, uint64_t addr, const uint32_t *code,
@@ -159,7 +176,36 @@ static void strobe_soft_reset(QTestState *qts, int k2_offset)
     qtest_writeb(qts, MACIO_BASE + k2_offset, 0);
 }
 
-static void test_two_cpus(void)
+/* mac-io's registers, as the firmware would map them */
+static void map_macio(QTestState *qts)
+{
+    g_assert_cmphex(u3_config_readl(qts, MACIO_SLOT, PCI_VENDOR_ID), ==,
+                    PCI_DEVICE_ID_APPLE_UNI_N_KEYL << 16 |
+                    PCI_VENDOR_ID_APPLE);
+    u3_config_writel(qts, MACIO_SLOT, PCI_BASE_ADDRESS_0, MACIO_BASE);
+    u3_config_writel(qts, MACIO_SLOT, PCI_COMMAND, PCI_COMMAND_MEMORY);
+}
+
+/* "info cpus" lists CPU #1 as halted, or not */
+static bool cpu1_halted(QTestState *qts)
+{
+    g_autofree char *cpus = qtest_hmp(qts, "info cpus");
+    char *cpu1 = strstr(cpus, "CPU #1:");
+    char *eol;
+
+    g_assert_nonnull(cpu1);
+    eol = strchr(cpu1, '\n');
+    if (eol) {
+        *eol = '\0';
+    }
+    return strstr(cpu1, "(halted)") != NULL;
+}
+
+/*
+ * Start powermac7_3 with two CPUs, the firmware above and the vectors in
+ * RAM, and mac-io mapped, and wait for CPU 0 to enter the firmware.
+ */
+static QTestState *start_two_cpus(void)
 {
     QTestState *qts;
     GError *err = NULL;
@@ -167,11 +213,6 @@ static void test_two_cpus(void)
     g_autofree uint8_t *rom = g_malloc0(rom_size);
     char *rom_path;
     int fd;
-
-    if (!qtest_has_accel("tcg")) {
-        g_test_skip("TCG is not available");
-        return;
-    }
 
     for (size_t i = 0; i < ARRAY_SIZE(rom_code); i++) {
         stl_be_p(&rom[ROM_CODE_OFFSET + 4 * i], rom_code[i]);
@@ -189,21 +230,51 @@ static void test_two_cpus(void)
     g_free(rom_path);
     write_code(qts, RESET_VECTOR, reset_code, ARRAY_SIZE(reset_code));
     write_code(qts, EXT_VECTOR, ext_code, ARRAY_SIZE(ext_code));
-
-    /* mac-io's registers, as the firmware would map them */
-    g_assert_cmphex(u3_config_readl(qts, MACIO_SLOT, PCI_VENDOR_ID), ==,
-                    PCI_DEVICE_ID_APPLE_UNI_N_KEYL << 16 |
-                    PCI_VENDOR_ID_APPLE);
-    u3_config_writel(qts, MACIO_SLOT, PCI_BASE_ADDRESS_0, MACIO_BASE);
-    u3_config_writel(qts, MACIO_SLOT, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    map_macio(qts);
 
     qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
+    g_assert_cmpuint(wait_for(qts, ROM_ENTRY_COUNT, 1), ==, 1);
+    return qts;
+}
+
+/*
+ * Send IPI n to CPU n, as AppleMPIC does, through the sender's dispatch
+ * register (AppleMPIC-1.5.3, AppleMPIC.cpp:618-629), and check that the
+ * target took one more external interrupt and the other CPU none.
+ */
+static void check_ipi(QTestState *qts, int target)
+{
+    int other = !target;
+    uint32_t target_id = target ? ID_CPU1 : ID_CPU0;
+    uint32_t other_id = other ? ID_CPU1 : ID_CPU0;
+    uint32_t target_count = qtest_readl(qts, EXT_COUNT(target_id));
+    uint32_t other_count = qtest_readl(qts, EXT_COUNT(other_id));
+
+    mpic_writel(qts, MPIC_IPI_DISPATCH(0, target), 1 << target);
+    g_assert_cmpuint(wait_for(qts, EXT_COUNT(target_id), target_count + 1),
+                     ==, target_count + 1);
+    g_usleep(100 * 1000);
+    g_assert_cmpuint(qtest_readl(qts, EXT_COUNT(target_id)), ==,
+                     target_count + 1);
+    g_assert_cmpuint(qtest_readl(qts, EXT_COUNT(other_id)), ==, other_count);
+}
+
+static void test_two_cpus(void)
+{
+    QTestState *qts;
+
+    if (!qtest_has_accel("tcg")) {
+        g_test_skip("TCG is not available");
+        return;
+    }
+
+    qts = start_two_cpus();
 
     /* CPU 0 runs the firmware, and CPU 1 runs nothing */
-    g_assert_cmpuint(wait_for(qts, ROM_ENTRY_COUNT, 1), ==, 1);
     g_usleep(200 * 1000);
     g_assert_cmpuint(qtest_readl(qts, ROM_ENTRY_COUNT), ==, 1);
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU1)), ==, 0);
+    g_assert_true(cpu1_halted(qts));
 
     /* CPU 1's strobe starts CPU 1 at 0x100, and leaves CPU 0 alone */
     strobe_soft_reset(qts, K2_SOFT_RESET_CPU1);
@@ -211,6 +282,7 @@ static void test_two_cpus(void)
     g_usleep(100 * 1000);
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU1)), ==, 1);
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU0)), ==, 0);
+    g_assert_false(cpu1_halted(qts));
 
     /* CPU 0's strobe resets CPU 0 alone */
     strobe_soft_reset(qts, K2_SOFT_RESET_CPU0);
@@ -219,26 +291,49 @@ static void test_two_cpus(void)
     g_assert_cmpuint(qtest_readl(qts, RESET_COUNT(ID_CPU1)), ==, 1);
     g_assert_cmpuint(qtest_readl(qts, ROM_ENTRY_COUNT), ==, 1);
 
-    /*
-     * IPIs, as AppleMPIC sends them: IPI n goes to CPU n, through the
-     * sender's dispatch register (AppleMPIC-1.5.3, AppleMPIC.cpp:618-629).
-     * Both CPUs take any priority.
-     */
+    /* Both CPUs take any priority */
     for (int n = 0; n < 2; n++) {
         mpic_writel(qts, MPIC_IPI_IVPR(n),
                     MPIC_IPI_PRIORITY << 16 | (0x40 + n));
         mpic_writel(qts, MPIC_CTPR(n), 0);
     }
 
-    mpic_writel(qts, MPIC_IPI_DISPATCH(0, 0), 1 << 0);
-    g_assert_cmpuint(wait_for(qts, EXT_COUNT(ID_CPU0), 1), ==, 1);
-    g_usleep(100 * 1000);
-    g_assert_cmpuint(qtest_readl(qts, EXT_COUNT(ID_CPU1)), ==, 0);
+    /* Each CPU's IPIs reach it alone, more than once */
+    check_ipi(qts, 0);
+    check_ipi(qts, 1);
+    check_ipi(qts, 0);
+    check_ipi(qts, 1);
 
-    mpic_writel(qts, MPIC_IPI_DISPATCH(0, 1), 1 << 1);
-    g_assert_cmpuint(wait_for(qts, EXT_COUNT(ID_CPU1), 1), ==, 1);
-    g_usleep(100 * 1000);
-    g_assert_cmpuint(qtest_readl(qts, EXT_COUNT(ID_CPU0)), ==, 1);
+    qtest_quit(qts);
+}
+
+/*
+ * A machine reset releases the soft-reset lines, so a strobe after it
+ * still starts CPU 1, even if the line was held low when it came.
+ */
+static void test_soft_reset_after_system_reset(void)
+{
+    QTestState *qts;
+
+    if (!qtest_has_accel("tcg")) {
+        g_test_skip("TCG is not available");
+        return;
+    }
+
+    qts = start_two_cpus();
+
+    /* Hold CPU 1's line low: that starts it once */
+    qtest_writeb(qts, MACIO_BASE + K2_SOFT_RESET_CPU1, GPIO_OUTPUT_ENABLE);
+    g_assert_cmpuint(wait_for(qts, RESET_COUNT(ID_CPU1), 1), ==, 1);
+
+    /* RAM keeps the counts and the vectors; PCI forgets mac-io's BAR */
+    qtest_system_reset(qts);
+    g_assert_cmpuint(wait_for(qts, ROM_ENTRY_COUNT, 2), ==, 2);
+    g_assert_true(cpu1_halted(qts));
+    map_macio(qts);
+
+    strobe_soft_reset(qts, K2_SOFT_RESET_CPU1);
+    g_assert_cmpuint(wait_for(qts, RESET_COUNT(ID_CPU1), 2), ==, 2);
 
     qtest_quit(qts);
 }
@@ -247,5 +342,7 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("mac-g5-smp/two-cpus", test_two_cpus);
+    qtest_add_func("mac-g5-smp/soft-reset-after-system-reset",
+                   test_soft_reset_after_system_reset);
     return g_test_run();
 }
