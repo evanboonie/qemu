@@ -194,6 +194,8 @@ qtests_ppc64 = \
   qtests_ppc + \
   (config_all_devices.has_key('CONFIG_PSERIES') ? ['device-plug-test'] : []) +               \
   (config_all_devices.has_key('CONFIG_MAC_G5') ? ['mac-g5-test'] : []) +                    \
+  (config_all_devices.has_key('CONFIG_MAC_G5') and                                          \
+   config_all_accel.has_key('CONFIG_TCG') ? ['mac-g5-smp-test'] : []) +                      \
   (config_all_devices.has_key('CONFIG_POWERNV') ? ['pnv-xscom-test'] : []) +                 \
   (config_all_devices.has_key('CONFIG_POWERNV') ? ['pnv-xive2-test'] : []) +                 \
   (config_all_devices.has_key('CONFIG_POWERNV') ? ['pnv-spi-seeprom-test'] : []) +           \
