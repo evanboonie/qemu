@@ -101,12 +101,18 @@ static void check_agp_capability(QTestState *qts)
     g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_STATUS), ==,
                     0x1f00020a);
 
-    /* The command register keeps what's written to it */
+    /*
+     * The command register keeps its fields, but not the AGP 3.0 mode bit
+     * Mac OS X also writes, and a reset clears it
+     */
     g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND), ==,
                     0);
     u3_config_writel(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND, 0x1f00030a);
     g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND), ==,
-                    0x1f00030a);
+                    0x1f000302);
+    qtest_system_reset(qts);
+    g_assert_cmphex(u3_config_readl(qts, 11, U3_AGP_CAP + PCI_AGP_COMMAND), ==,
+                    0);
 }
 
 static void check_machine(const char *machine, uint16_t machine_id,
@@ -132,6 +138,7 @@ static void check_machine(const char *machine, uint16_t machine_id,
     g_assert_cmphex(qtest_readl(qts, U3_REG_BASE), ==, u3_version);
     check_io_window(qts, io_window, not_io_window);
 
+    /* Last, since it resets the machine */
     check_agp_capability(qts);
 
     qtest_quit(qts);

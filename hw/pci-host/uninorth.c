@@ -298,9 +298,23 @@ static void unin_agp_pci_host_realize(PCIDevice *d, Error **errp)
     /* d->config[PCI_CAPABILITY_LIST] = 0x80; */
 }
 
+#define U3_AGP_CAP              0x80
+
 /* AGP 3.0 status bits, which pci_regs.h doesn't name */
 #define U3_AGP_STATUS_MODE3     0x0008  /* AGP 3.0 signalling */
 #define U3_AGP_STATUS_8X        0x0002  /* 8x, in AGP 3.0 mode */
+
+/*
+ * The AGP command register's fields: request depth, AGP 3.0's
+ * asynchronous request size (15:13) and calibration cycle (12:10),
+ * sideband, enable, 4G, fast write and rate. Its other bits read as 0.
+ */
+#define U3_AGP_COMMAND_MASK     (PCI_AGP_COMMAND_RQ_MASK | 0xfc00 | \
+                                 PCI_AGP_COMMAND_SBA | PCI_AGP_COMMAND_AGP | \
+                                 PCI_AGP_COMMAND_64BIT | PCI_AGP_COMMAND_FW | \
+                                 PCI_AGP_COMMAND_RATE4 | \
+                                 PCI_AGP_COMMAND_RATE2 | \
+                                 PCI_AGP_COMMAND_RATE1)
 
 static void u3_agp_pci_host_realize(PCIDevice *d, Error **errp)
 {
@@ -314,10 +328,13 @@ static void u3_agp_pci_host_realize(PCIDevice *d, Error **errp)
      * configure a bridge without an AGP capability. The real U3's isn't
      * documented, so its status has the bits the real AGP G5 enables:
      * Mac OS X 10.5.8 programs its card with 0x1f00030a, and it only sets
-     * the bits that both U3 and the card report. There's no GART, so
-     * writes to the command register are kept and do nothing else.
+     * the bits that both U3 and the card report. It reads them as AGP 3.0
+     * bits only when the device tree gives U3 a revision above 0x30, as
+     * the real one's 0x35 is. There's no GART, so writes to the command
+     * register are kept and do nothing else.
      */
-    cap = pci_add_capability(d, PCI_CAP_ID_AGP, 0x80, PCI_AGP_SIZEOF, errp);
+    cap = pci_add_capability(d, PCI_CAP_ID_AGP, U3_AGP_CAP, PCI_AGP_SIZEOF,
+                             errp);
     if (cap < 0) {
         return;
     }
@@ -325,7 +342,15 @@ static void u3_agp_pci_host_realize(PCIDevice *d, Error **errp)
     pci_set_long(d->config + cap + PCI_AGP_STATUS,
                  0x1f000000 | PCI_AGP_STATUS_SBA | U3_AGP_STATUS_MODE3 |
                  U3_AGP_STATUS_8X);
-    pci_set_long(d->wmask + cap + PCI_AGP_COMMAND, 0xffffffff);
+    pci_set_long(d->wmask + cap + PCI_AGP_COMMAND, U3_AGP_COMMAND_MASK);
+}
+
+static void u3_agp_pci_host_reset_hold(Object *obj, ResetType type)
+{
+    PCIDevice *d = PCI_DEVICE(obj);
+
+    /* AGP is off until the guest enables it again */
+    pci_set_long(d->config + U3_AGP_CAP + PCI_AGP_COMMAND, 0);
 }
 
 static void unin_internal_pci_host_realize(PCIDevice *d, Error **errp)
@@ -367,7 +392,9 @@ static void u3_agp_pci_host_class_init(ObjectClass *klass, const void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
+    rc->phases.hold = u3_agp_pci_host_reset_hold;
     k->realize   = u3_agp_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_APPLE;
     k->device_id = PCI_DEVICE_ID_APPLE_U3_AGP;
