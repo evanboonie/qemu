@@ -501,6 +501,8 @@ static void test_powermac7_3_prom_env(void)
 #define TARGET_PA               0x00d00000
 #define FAR_PA                  0x00f00000
 #define PLAIN_PA                0x00e00000
+#define PLAIN_ALIAS_PA          0x00f80000      /* PLAIN_PA's bus page maps here */
+#define INVALID_PA              0x00e80000      /* in INVALID_BUS's entry, not valid */
 #define CMD_BUS                 0x00100000
 #define TARGET_BUS              0x00200000
 #define INVALID_BUS             0x00300000
@@ -586,6 +588,19 @@ static void test_powermac7_3_dart(void)
     qtest_memset(qts, DART_TABLE_PA, 0, 512 * 4096);
     dart_set_entry(qts, CMD_BUS, CMD_PA);
     dart_set_entry(qts, TARGET_BUS, TARGET_PA);
+    dart_set_entry(qts, PLAIN_PA, PLAIN_ALIAS_PA);
+    /* A page number, but not the valid bit */
+    qtest_writel(qts, DART_TABLE_PA + (INVALID_BUS >> 12) * 4, INVALID_PA >> 12);
+
+    /*
+     * With the table set but DARTEN clear, a bus address is still the
+     * physical one, though PLAIN_PA's bus page has a valid entry
+     */
+    qtest_writel(qts, DART_CNTL, table_cntl);
+    dbdma_store_word(qts, CMD_PA, PLAIN_PA + 0x20, 0x22334455);
+    g_assert_cmphex(read_le32(qts, PLAIN_PA + 0x20), ==, 0x22334455);
+    g_assert_cmphex(read_le32(qts, PLAIN_ALIAS_PA + 0x20), ==, 0);
+
     qtest_writel(qts, DART_CNTL, table_cntl | DART_CNTL_DARTEN |
                  DART_CNTL_IDARTTLB);
     g_assert_cmphex(qtest_readl(qts, DART_CNTL), ==,
@@ -601,9 +616,14 @@ static void test_powermac7_3_dart(void)
     g_assert_cmphex(read_le32(qts, TARGET_BUS + 0x10), ==, 0);
     g_assert_cmphex(read_le32(qts, CMD_PA + 12) >> 16, !=, 0);
 
-    /* An invalid entry: nothing is written, there or at its bus address */
+    /*
+     * An entry without the valid bit: nothing is written, not at its bus
+     * address, nor at the page number it holds, nor at page 0
+     */
     dbdma_store_word(qts, CMD_BUS, INVALID_BUS, 0x99aabbcc);
     g_assert_cmphex(read_le32(qts, INVALID_BUS), ==, 0);
+    g_assert_cmphex(read_le32(qts, INVALID_PA), ==, 0);
+    g_assert_cmphex(read_le32(qts, 0), ==, 0);
     g_assert_cmphex(read_le32(qts, TARGET_PA), ==, 0);
 
     /*
