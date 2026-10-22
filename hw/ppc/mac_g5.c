@@ -7,7 +7,8 @@
  * PowerMac7,3 rather than mac99's PowerMac3,1. Its U3 is laid out as the
  * real one: PCI I/O at 0xf0000000, and version 0x35. Given -drive
  * if=pflash, its NVRAM is the real one's 16 KB of AMD-style flash at
- * 0xfff04000, a pflash_cfi02, in place of mac99's macio-nvram.
+ * 0xfff04000, a pflash_cfi02, in place of mac99's macio-nvram. Its K2
+ * GPIOs start CPUs and freeze their time bases.
  * ppc_newworld_init() builds both.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -38,6 +39,18 @@
 #define POWERMAC7_3_MAX_CPUS            2
 
 /*
+ * Every CPU's TBEN is one K2 GPIO, at 0x77 (GPIO 0x1f), an offset the real
+ * PowerMac7,3's GPIOs don't use. Mac OS X freezes the time bases while it
+ * copies CPU 0's to a CPU it starts (xnu-1228.15.4, cpu.c:710-790), with
+ * MacRISC4CPU::enableCPUTimeBase (AppleMacRISC4PE-204.0.9,
+ * MacRISC4CPU.cpp:777-785), which calls the platform-cpu-timebase function
+ * that AppleGPIO publishes for a gpio node named timebase-enable, as on the
+ * PCIe G5's timebase-enable@26. Driven low, the time bases hold; released,
+ * the line reads high and they count.
+ */
+#define POWERMAC7_3_GPIO_TIMEBASE_ENABLE 0x1f
+
+/*
  * The falling edge requests the reset, and the release doesn't cancel it:
  * the CPU may run on another thread and not have taken it yet. It's
  * cleared once taken, and it wakes a CPU that's powered off. A 970 halted
@@ -49,6 +62,15 @@ static void powermac7_3_soft_reset(void *opaque, int n, int level)
 {
     if (!level) {
         ppc_set_irq(POWERPC_CPU(opaque), PPC_INTERRUPT_RESET, 1);
+    }
+}
+
+static void powermac7_3_timebase_enable(void *opaque, int n, int level)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        qemu_set_irq(qdev_get_gpio_in(DEVICE(cs), PPC970_INPUT_TBEN), level);
     }
 }
 
@@ -82,6 +104,10 @@ static void powermac7_3_init(MachineState *machine)
                                     qemu_allocate_irq(powermac7_3_soft_reset,
                                                       qemu_get_cpu(i), 0));
     }
+    qdev_connect_gpio_out_named(gpio, MACIO_GPIO_OUT,
+                                POWERMAC7_3_GPIO_TIMEBASE_ENABLE,
+                                qemu_allocate_irq(powermac7_3_timebase_enable,
+                                                  NULL, 0));
 }
 
 static void powermac7_3_class_init(ObjectClass *oc, const void *data)
