@@ -29,7 +29,6 @@
 #include "qemu/timer.h"
 #include "exec/cpu-interrupt.h"
 #include "system/cpus.h"
-#include "exec/icount.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
@@ -1646,14 +1645,14 @@ void ppc_irq_reset(PowerPCCPU *cpu)
     }
     /*
      * TBEN reads high again, so a time base that TBEN froze counts again,
-     * after any change still pending. The CPU isn't running guest code
-     * while it's reset, so this needn't go through its thread. As for
-     * cpu_ppc_tb_reset(), a machine reset comes before icount's clock is
-     * reset, so with icount the time base restarts as of 0.
+     * as of now, after any change still pending. The CPU isn't running
+     * guest code while it's reset, so this needn't go through its thread.
+     * Unlike cpu_ppc_tb_reset()'s now == 0, this changes nothing unless
+     * the time base is frozen, which it can't be at the reset before a
+     * run starts, and nothing resets icount's clock at a reset mid-run.
      */
     if (env->tb_env) {
         cpu_ppc_tben_apply(env);
-        cpu_ppc_tb_start(env, icount_enabled() ? 0 :
-                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        cpu_ppc_tb_start(env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
 }
