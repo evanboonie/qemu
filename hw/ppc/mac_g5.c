@@ -39,8 +39,11 @@
 #define POWERMAC7_3_MAX_CPUS            2
 
 /*
- * Every CPU's TBEN is one K2 GPIO, at 0x77 (GPIO 0x1f), an offset the real
- * PowerMac7,3's GPIOs don't use. Mac OS X freezes the time bases while it
+ * Every CPU's TBEN is one K2 GPIO, at K2 0x77: offset 0x27 in the gpio
+ * block at K2 0x50, as OpenBIOS's timebase-enable@27 node gives it, and
+ * QEMU's GPIO 0x1f, since the GPIO registers start at K2 0x58. The real
+ * PowerMac7,3's GPIOs don't use that offset (its headphone-mute@1f is
+ * offset 0x1f, QEMU's GPIO 0x17). Mac OS X freezes the time bases while it
  * copies CPU 0's to a CPU it starts (xnu-1228.15.4, cpu.c:710-790), with
  * MacRISC4CPU::enableCPUTimeBase (AppleMacRISC4PE-204.0.9,
  * MacRISC4CPU.cpp:777-785), which calls the platform-cpu-timebase function

@@ -143,7 +143,7 @@ static const uint32_t ext_code[] = {
  *   R + 0x200 + 8 * id: nonzero asks the CPU to write its time base, and
  *     it's cleared once that's done.
  *   R + 0x300 + 8 * id: the value to write, as mttbl, mttbu and mttbl write
- *     it, as Mac OS X does (xnu-1228.15.4, cpu.c:771-776).
+ *     it, as Mac OS X does (xnu-1228.15.4, cpu.c:739-741).
  * MSR[EE] stays clear, so no decrementer interrupt comes.
  */
 #define TB_NOW(id)              (GUEST_RESULT_ADDR + 0x100 + 8 * (id))
