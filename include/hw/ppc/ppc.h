@@ -37,6 +37,11 @@ struct ppc_tb_t {
     int64_t purr_offset;
     void *opaque;
     uint32_t flags;
+    /*
+     * TBEN changes not yet applied to the time bases, oldest first, which
+     * only the CPU's own thread or its reset applies; under the BQL
+     */
+    GQueue tben_changes;
 };
 
 /* PPC Timers flags */

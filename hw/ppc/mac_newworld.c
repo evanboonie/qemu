@@ -175,7 +175,7 @@ void ppc_newworld_init(MachineState *machine, Core99ViaConfig via_config,
         qdev_realize_and_unref(DEVICE(cpu), NULL, &error_fatal);
         env = &cpu->env;
 
-        /* Set time-base frequency to 100 Mhz */
+        /* Set time-base frequency to 25 MHz */
         cpu_ppc_tb_init(env, TBFREQ);
         qemu_register_reset(ppc_core99_reset, cpu);
     }

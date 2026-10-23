@@ -39,8 +39,25 @@
 #include "migration/vmstate.h"
 #include "trace.h"
 
-static void cpu_ppc_tb_stop (CPUPPCState *env);
-static void cpu_ppc_tb_start (CPUPPCState *env);
+static void cpu_ppc_set_tben(PowerPCCPU *cpu, int level);
+
+/*
+ * The levels a CPU's inputs read from reset: low, but TBEN's, which is
+ * high, so the time base counts, until something drives it
+ */
+static uint32_t ppc_irq_input_reset_state(CPUPPCState *env)
+{
+    switch (PPC_INPUT(env)) {
+    case PPC_FLAGS_INPUT_6xx:
+        return 1 << PPC6xx_INPUT_TBEN;
+#if defined(TARGET_PPC64)
+    case PPC_FLAGS_INPUT_970:
+        return 1 << PPC970_INPUT_TBEN;
+#endif
+    default:
+        return 0;
+    }
+}
 
 void ppc_set_irq(PowerPCCPU *cpu, int irq, int level)
 {
@@ -87,11 +104,7 @@ static void ppc6xx_set_irq(void *opaque, int pin, int level)
         case PPC6xx_INPUT_TBEN:
             /* Level sensitive - active high */
             trace_ppc_irq_set_state("time base", level);
-            if (level) {
-                cpu_ppc_tb_start(env);
-            } else {
-                cpu_ppc_tb_stop(env);
-            }
+            cpu_ppc_set_tben(cpu, level);
             break;
         case PPC6xx_INPUT_INT:
             /* Level sensitive - active high */
@@ -146,6 +159,7 @@ static void ppc6xx_set_irq(void *opaque, int pin, int level)
 void ppc6xx_irq_init(PowerPCCPU *cpu)
 {
     qdev_init_gpio_in(DEVICE(cpu), ppc6xx_set_irq, PPC6xx_INPUT_NB);
+    cpu->env.irq_input_state = ppc_irq_input_reset_state(&cpu->env);
 }
 
 #if defined(TARGET_PPC64)
@@ -208,8 +222,9 @@ static void ppc970_set_irq(void *opaque, int pin, int level)
             ppc_set_irq(cpu, PPC_INTERRUPT_RESET, level);
             break;
         case PPC970_INPUT_TBEN:
-            trace_ppc_irq_set_state("TBEN IRQ", level);
-            /* XXX: TODO */
+            /* Level sensitive - active high */
+            trace_ppc_irq_set_state("time base", level);
+            cpu_ppc_set_tben(cpu, level);
             break;
         default:
             g_assert_not_reached();
@@ -224,6 +239,7 @@ static void ppc970_set_irq(void *opaque, int pin, int level)
 void ppc970_irq_init(PowerPCCPU *cpu)
 {
     qdev_init_gpio_in(DEVICE(cpu), ppc970_set_irq, PPC970_INPUT_NB);
+    cpu->env.irq_input_state = ppc_irq_input_reset_state(&cpu->env);
 }
 
 /* POWER7 internal IRQ controller */
@@ -678,36 +694,40 @@ void cpu_ppc_store_tbu40(CPUPPCState *env, uint64_t value)
     cpu_ppc_store_tb(tb_env, clock, &tb_env->tb_offset, tb);
 }
 
-static void cpu_ppc_tb_stop (CPUPPCState *env)
+/*
+ * TBEN low freezes the time base and the alternate time base at their
+ * values at vmclk, and high restarts them from there: while frozen, a time
+ * base reads its offset, and a write sets it. vmclk is when TBEN changed,
+ * so a CPU whose thread gets to the change later still freezes and
+ * restarts as of then.
+ */
+static void cpu_ppc_tb_stop(CPUPPCState *env, int64_t vmclk)
 {
     ppc_tb_t *tb_env = env->tb_env;
-    uint64_t tb, atb, vmclk;
+    uint64_t tb, atb;
 
     /* If the time base is already frozen, do nothing */
     if (tb_env->tb_freq != 0) {
-        vmclk = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        /* Get the time base */
+        /* Get the time base and the alternate time base */
         tb = cpu_ppc_get_tb(tb_env, vmclk, tb_env->tb_offset);
-        /* Get the alternate time base */
         atb = cpu_ppc_get_tb(tb_env, vmclk, tb_env->atb_offset);
-        /* Store the time base value (ie compute the current offset) */
-        cpu_ppc_store_tb(tb_env, vmclk, &tb_env->tb_offset, tb);
-        /* Store the alternate time base value (compute the current offset) */
-        cpu_ppc_store_tb(tb_env, vmclk, &tb_env->atb_offset, atb);
-        /* Set the time base frequency to zero */
+        /*
+         * Set the time base frequency to zero first, so that storing the
+         * values makes them the offsets the frozen time bases read
+         */
         tb_env->tb_freq = 0;
-        /* Now, the time bases are frozen to tb_offset / atb_offset value */
+        cpu_ppc_store_tb(tb_env, vmclk, &tb_env->tb_offset, tb);
+        cpu_ppc_store_tb(tb_env, vmclk, &tb_env->atb_offset, atb);
     }
 }
 
-static void cpu_ppc_tb_start (CPUPPCState *env)
+static void cpu_ppc_tb_start(CPUPPCState *env, int64_t vmclk)
 {
     ppc_tb_t *tb_env = env->tb_env;
-    uint64_t tb, atb, vmclk;
+    uint64_t tb, atb;
 
     /* If the time base is not frozen, do nothing */
     if (tb_env->tb_freq == 0) {
-        vmclk = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         /* Get the time base from tb_offset */
         tb = tb_env->tb_offset;
         /* Get the alternate time base from atb_offset */
@@ -718,6 +738,60 @@ static void cpu_ppc_tb_start (CPUPPCState *env)
         cpu_ppc_store_tb(tb_env, vmclk, &tb_env->tb_offset, tb);
         /* Store the alternate time base value */
         cpu_ppc_store_tb(tb_env, vmclk, &tb_env->atb_offset, atb);
+    }
+}
+
+typedef struct PPCTBENChange {
+    int64_t vmclk;
+    bool level;
+} PPCTBENChange;
+
+/*
+ * Apply a CPU's pending TBEN changes, in order, each as of its own time,
+ * so that a change made at once never overtakes one still queued.
+ */
+static void cpu_ppc_tben_apply(CPUPPCState *env)
+{
+    PPCTBENChange *change;
+
+    BQL_LOCK_GUARD();
+    while ((change = g_queue_pop_head(&env->tb_env->tben_changes))) {
+        if (change->level) {
+            cpu_ppc_tb_start(env, change->vmclk);
+        } else {
+            cpu_ppc_tb_stop(env, change->vmclk);
+        }
+        g_free(change);
+    }
+}
+
+static void cpu_ppc_tben_work(CPUState *cs, run_on_cpu_data data)
+{
+    cpu_ppc_tben_apply(cpu_env(cs));
+}
+
+/*
+ * A change of a CPU's TBEN input, as of now. Its time bases are read by
+ * its own thread, outside the BQL, so they change only on that thread, and
+ * no reader sees them half changed: at once if that's the caller's, as for
+ * a CPU that drives its own TBEN, and otherwise as queued work, which the
+ * CPU's thread runs once the kick takes it out of guest code. Either way
+ * they change as of the time of the change, after any change before it.
+ */
+static void cpu_ppc_set_tben(PowerPCCPU *cpu, int level)
+{
+    CPUState *cs = CPU(cpu);
+    CPUPPCState *env = &cpu->env;
+    PPCTBENChange *change = g_new(PPCTBENChange, 1);
+
+    BQL_LOCK_GUARD();
+    change->vmclk = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    change->level = level;
+    g_queue_push_tail(&env->tb_env->tben_changes, change);
+    if (qemu_cpu_is_self(cs)) {
+        cpu_ppc_tben_apply(env);
+    } else {
+        async_run_on_cpu(cs, cpu_ppc_tben_work, RUN_ON_CPU_NULL);
     }
 }
 
@@ -1159,6 +1233,7 @@ void cpu_ppc_tb_free(CPUPPCState *env)
 {
     timer_free(env->tb_env->decr_timer);
     timer_free(env->tb_env->hdecr_timer);
+    g_queue_clear_full(&env->tb_env->tben_changes, g_free);
     g_free(env->tb_env);
 }
 
@@ -1564,8 +1639,20 @@ void ppc_irq_reset(PowerPCCPU *cpu)
 {
     CPUPPCState *env = &cpu->env;
 
-    env->irq_input_state = 0;
+    env->irq_input_state = ppc_irq_input_reset_state(env);
     if (kvm_enabled()) {
         kvmppc_set_interrupt(cpu, PPC_INTERRUPT_EXT, 0);
+    }
+    /*
+     * TBEN reads high again, so a time base that TBEN froze counts again,
+     * as of now, after any change still pending. The CPU isn't running
+     * guest code while it's reset, so this needn't go through its thread.
+     * Unlike cpu_ppc_tb_reset()'s now == 0, this changes nothing unless
+     * the time base is frozen, which it can't be at the reset before a
+     * run starts, and nothing resets icount's clock at a reset mid-run.
+     */
+    if (env->tb_env) {
+        cpu_ppc_tben_apply(env);
+        cpu_ppc_tb_start(env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
 }
