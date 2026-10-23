@@ -29,6 +29,7 @@
 #include "qemu/timer.h"
 #include "exec/cpu-interrupt.h"
 #include "system/cpus.h"
+#include "exec/icount.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
@@ -746,16 +747,28 @@ typedef struct PPCTBENChange {
     bool level;
 } PPCTBENChange;
 
-static void cpu_ppc_tben_apply(CPUState *cs, run_on_cpu_data data)
+/*
+ * Apply a CPU's pending TBEN changes, in order, each as of its own time,
+ * so that a change made at once never overtakes one still queued.
+ */
+static void cpu_ppc_tben_apply(CPUPPCState *env)
 {
-    PPCTBENChange *change = data.host_ptr;
+    PPCTBENChange *change;
 
-    if (change->level) {
-        cpu_ppc_tb_start(cpu_env(cs), change->vmclk);
-    } else {
-        cpu_ppc_tb_stop(cpu_env(cs), change->vmclk);
+    BQL_LOCK_GUARD();
+    while ((change = g_queue_pop_head(&env->tb_env->tben_changes))) {
+        if (change->level) {
+            cpu_ppc_tb_start(env, change->vmclk);
+        } else {
+            cpu_ppc_tb_stop(env, change->vmclk);
+        }
+        g_free(change);
     }
-    g_free(change);
+}
+
+static void cpu_ppc_tben_work(CPUState *cs, run_on_cpu_data data)
+{
+    cpu_ppc_tben_apply(cpu_env(cs));
 }
 
 /*
@@ -764,19 +777,22 @@ static void cpu_ppc_tben_apply(CPUState *cs, run_on_cpu_data data)
  * no reader sees them half changed: at once if that's the caller's, as for
  * a CPU that drives its own TBEN, and otherwise as queued work, which the
  * CPU's thread runs once the kick takes it out of guest code. Either way
- * they change as of the time of the change.
+ * they change as of the time of the change, after any change before it.
  */
 static void cpu_ppc_set_tben(PowerPCCPU *cpu, int level)
 {
     CPUState *cs = CPU(cpu);
+    CPUPPCState *env = &cpu->env;
     PPCTBENChange *change = g_new(PPCTBENChange, 1);
 
+    BQL_LOCK_GUARD();
     change->vmclk = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     change->level = level;
+    g_queue_push_tail(&env->tb_env->tben_changes, change);
     if (qemu_cpu_is_self(cs)) {
-        cpu_ppc_tben_apply(cs, RUN_ON_CPU_HOST_PTR(change));
+        cpu_ppc_tben_apply(env);
     } else {
-        async_run_on_cpu(cs, cpu_ppc_tben_apply, RUN_ON_CPU_HOST_PTR(change));
+        async_run_on_cpu(cs, cpu_ppc_tben_work, RUN_ON_CPU_NULL);
     }
 }
 
@@ -1218,6 +1234,7 @@ void cpu_ppc_tb_free(CPUPPCState *env)
 {
     timer_free(env->tb_env->decr_timer);
     timer_free(env->tb_env->hdecr_timer);
+    g_queue_clear_full(&env->tb_env->tben_changes, g_free);
     g_free(env->tb_env);
 }
 
@@ -1628,11 +1645,15 @@ void ppc_irq_reset(PowerPCCPU *cpu)
         kvmppc_set_interrupt(cpu, PPC_INTERRUPT_EXT, 0);
     }
     /*
-     * TBEN reads high again, so a time base that TBEN froze counts again.
-     * The CPU isn't running guest code while it's reset, so this needn't
-     * go through its thread.
+     * TBEN reads high again, so a time base that TBEN froze counts again,
+     * after any change still pending. The CPU isn't running guest code
+     * while it's reset, so this needn't go through its thread. As for
+     * cpu_ppc_tb_reset(), a machine reset comes before icount's clock is
+     * reset, so with icount the time base restarts as of 0.
      */
     if (env->tb_env) {
-        cpu_ppc_tb_start(env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        cpu_ppc_tben_apply(env);
+        cpu_ppc_tb_start(env, icount_enabled() ? 0 :
+                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
 }

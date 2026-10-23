@@ -580,6 +580,35 @@ static void test_timebase_after_system_reset(void)
     qtest_quit(qts);
 }
 
+/*
+ * TBEN driven low while the VM is stopped, and a machine reset before it
+ * runs again: the time base counts after the reset, whenever the CPU's
+ * thread got to the change.
+ */
+static void test_timebase_enable_stopped_reset(void)
+{
+    QTestState *qts;
+    uint64_t tb;
+
+    if (!qtest_has_accel("tcg")) {
+        g_test_skip("TCG is not available");
+        return;
+    }
+
+    qts = start_tb_test(NULL, 1);
+    qtest_qmp_assert_success(qts, "{ 'execute': 'stop' }");
+    qtest_writeb(qts, MACIO_BASE + K2_TIMEBASE_ENABLE, GPIO_OUTPUT_ENABLE);
+    qtest_system_reset(qts);
+    tb = tb_now(qts, ID_CPU0);
+    qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
+
+    /* CPU 0 runs the firmware again, and its loop from 0x100 */
+    tb = wait_tb_moves(qts, ID_CPU0, tb);
+    g_assert_cmphex(wait_tb_moves(qts, ID_CPU0, tb), >, tb);
+
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     static const char *const cpus[] = {
@@ -598,5 +627,7 @@ int main(int argc, char **argv)
     }
     qtest_add_func("mac-g5-smp/timebase-after-system-reset",
                    test_timebase_after_system_reset);
+    qtest_add_func("mac-g5-smp/timebase-enable-stopped-reset",
+                   test_timebase_enable_stopped_reset);
     return g_test_run();
 }
